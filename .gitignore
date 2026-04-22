@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+
+# Node
+node_modules/
+.next/
+out/
+.env*.local
+
+# Backend temp
+backend/temp/*
+!backend/temp/.gitkeep
+
+# OS
+.DS_Store
+Thumbs.db
