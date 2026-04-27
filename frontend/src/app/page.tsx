@@ -113,7 +113,7 @@ export default function Home() {
       {phase.kind === "aligning" && (
         <StatusOverlay
           message="음성과 대본을 정렬 중..."
-          detail="오디오 길이에 따라 30초~수 분이 소요됩니다."
+          detail="Whisper 기반 정렬: 10분 음성 ≈ 2~5분, 30분 음성 ≈ 8~15분 소요됩니다."
         />
       )}
     </main>

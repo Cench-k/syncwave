@@ -1,114 +1,284 @@
-"""Forced alignment using aeneas.
+"""Forced alignment via Whisper word timestamps + line fuzzy matching.
 
-Wraps aeneas's ExecuteTask API to align a script (.txt, one block per line)
-to an audio file (.mp3/.wav). Returns a list of {index, start, end, text}.
+Pipeline:
+  1. faster-whisper transcribes the audio with word-level timestamps.
+  2. Each user-provided script line is matched to a span of Whisper words
+     using Needleman-Wunsch global alignment over normalized words.
+  3. Each line gets the start time of its first matched word and the end
+     time of its last matched word. Unmatched lines are interpolated.
+
+Replaces the previous aeneas+espeak-ng pipeline, which had poor accuracy
+for Korean/Japanese due to espeak's robotic synthesis being a bad DTW
+reference for natural speech.
 """
 from __future__ import annotations
 
+import re
+import threading
+import unicodedata
+from typing import List, Optional
+
+from faster_whisper import WhisperModel
+
+
+# Model is loaded lazily on first /align call and cached for the process
+# lifetime. medium/int8 = ~750MB on disk, ~1.5GB RAM, decent KO/JA accuracy
+# on CPU. Override via env if needed.
 import os
-import shutil
-import tempfile
-from dataclasses import dataclass
-from typing import List
+_MODEL_SIZE = os.environ.get("WHISPER_MODEL", "medium")
+_MODEL_DEVICE = os.environ.get("WHISPER_DEVICE", "cpu")
+_MODEL_COMPUTE = os.environ.get("WHISPER_COMPUTE", "int8")
 
-from aeneas.executetask import ExecuteTask
-from aeneas.runtimeconfiguration import RuntimeConfiguration
-from aeneas.task import Task
-from aeneas.ttswrappers.espeakngttswrapper import ESPEAKNGTTSWrapper
-
-# espeak-ng supports Korean and Japanese, but aeneas's wrapper omits them.
-# Inject the mappings so task_language=kor/jpn resolves to the right voice codes.
-ESPEAKNGTTSWrapper.LANGUAGE_TO_VOICE_CODE.setdefault("kor", "ko")
-ESPEAKNGTTSWrapper.LANGUAGE_TO_VOICE_CODE.setdefault("jpn", "ja")
-ESPEAKNGTTSWrapper.LANGUAGE_TO_VOICE_CODE.setdefault("ko", "ko")
-ESPEAKNGTTSWrapper.LANGUAGE_TO_VOICE_CODE.setdefault("ja", "ja")
+_MODEL: Optional[WhisperModel] = None
+_MODEL_LOCK = threading.Lock()
 
 
-LANG_MAP = {
-    "ko": "kor",
-    "ja": "jpn",
-}
+def _get_model() -> WhisperModel:
+    global _MODEL
+    if _MODEL is None:
+        with _MODEL_LOCK:
+            if _MODEL is None:
+                _MODEL = WhisperModel(
+                    _MODEL_SIZE,
+                    device=_MODEL_DEVICE,
+                    compute_type=_MODEL_COMPUTE,
+                )
+    return _MODEL
 
 
-def _espeak_ng_path() -> str:
-    """Locate the espeak-ng executable."""
-    found = shutil.which("espeak-ng") or shutil.which("espeak-ng.exe")
-    if found:
-        return found
-    default = r"C:\Program Files\eSpeak NG\espeak-ng.exe"
-    if os.path.exists(default):
-        return default
-    raise RuntimeError("espeak-ng executable not found in PATH")
+LANG_TO_WHISPER = {"ko": "ko", "ja": "ja"}
 
 
-@dataclass
-class AlignedBlock:
-    index: int
-    start: float
-    end: float
-    text: str
+def _normalize(text: str) -> str:
+    """Lowercase, NFKC, strip punctuation/symbols. Used for word matching."""
+    text = unicodedata.normalize("NFKC", text).lower()
+    text = re.sub(r"[\s　]+", " ", text)
+    # Drop punctuation but keep CJK chars and alphanumerics.
+    text = re.sub(r"[^\w぀-ヿ㐀-䶿一-鿿가-힯]", "", text)
+    return text.strip()
 
-    def to_dict(self) -> dict:
-        return {
-            "index": self.index,
-            "start": round(self.start, 3),
-            "end": round(self.end, 3),
-            "text": self.text,
-        }
+
+def _word_similarity(a: str, b: str) -> float:
+    """0~1 similarity: 1.0 if equal, prefix-overlap fraction otherwise."""
+    if not a or not b:
+        return 0.0
+    if a == b:
+        return 1.0
+    common = 0
+    for x, y in zip(a, b):
+        if x == y:
+            common += 1
+        else:
+            break
+    if common == 0:
+        # Try suffix overlap as a fallback for KO inflection.
+        for x, y in zip(reversed(a), reversed(b)):
+            if x == y:
+                common += 1
+            else:
+                break
+    return common / max(len(a), len(b))
+
+
+def _needleman_wunsch(a: List[str], b: List[str]) -> List[int]:
+    """Global alignment of word sequences a→b. Returns mapping[i] = j or -1."""
+    n, m = len(a), len(b)
+    if n == 0:
+        return []
+    if m == 0:
+        return [-1] * n
+
+    GAP = -0.5
+    MISMATCH_THRESHOLD = 0.4  # below this, treat as mismatch (-0.5)
+    score = [[0.0] * (m + 1) for _ in range(n + 1)]
+    trace = [[0] * (m + 1) for _ in range(n + 1)]  # 0=diag, 1=up, 2=left
+
+    for i in range(1, n + 1):
+        score[i][0] = score[i - 1][0] + GAP
+        trace[i][0] = 1
+    for j in range(1, m + 1):
+        score[0][j] = score[0][j - 1] + GAP
+        trace[0][j] = 2
+
+    for i in range(1, n + 1):
+        ai = a[i - 1]
+        score_prev = score[i - 1]
+        score_cur = score[i]
+        trace_cur = trace[i]
+        for j in range(1, m + 1):
+            sim = _word_similarity(ai, b[j - 1])
+            if sim < MISMATCH_THRESHOLD:
+                sim = -0.5
+            d = score_prev[j - 1] + sim
+            u = score_prev[j] + GAP
+            l = score_cur[j - 1] + GAP
+            if d >= u and d >= l:
+                score_cur[j] = d
+                trace_cur[j] = 0
+            elif u >= l:
+                score_cur[j] = u
+                trace_cur[j] = 1
+            else:
+                score_cur[j] = l
+                trace_cur[j] = 2
+
+    mapping = [-1] * n
+    i, j = n, m
+    while i > 0 or j > 0:
+        if i > 0 and j > 0 and trace[i][j] == 0:
+            # Only keep the mapping if it was a real match (sim above threshold).
+            if _word_similarity(a[i - 1], b[j - 1]) >= MISMATCH_THRESHOLD:
+                mapping[i - 1] = j - 1
+            i -= 1
+            j -= 1
+        elif i > 0 and (j == 0 or trace[i][j] == 1):
+            i -= 1
+        else:
+            j -= 1
+    return mapping
+
+
+def _interpolate_unmatched(
+    blocks_with_times: List[dict],
+    audio_duration: float,
+) -> List[dict]:
+    """Fill in start/end for blocks whose words didn't align to any Whisper word."""
+    n = len(blocks_with_times)
+    if n == 0:
+        return blocks_with_times
+
+    # Pass 1: forward-fill by anchoring to neighbors.
+    for i, b in enumerate(blocks_with_times):
+        if b["start"] is not None:
+            continue
+        # Find prev anchor
+        prev_end = 0.0
+        for k in range(i - 1, -1, -1):
+            if blocks_with_times[k]["end"] is not None:
+                prev_end = blocks_with_times[k]["end"]
+                break
+        # Find next anchor
+        next_start = audio_duration
+        next_idx = n
+        for k in range(i + 1, n):
+            if blocks_with_times[k]["start"] is not None:
+                next_start = blocks_with_times[k]["start"]
+                next_idx = k
+                break
+        # Distribute proportionally over the gap by character-length weight.
+        gap = max(0.0, next_start - prev_end)
+        # Indices needing fill in [i .. next_idx-1]
+        unfilled = list(range(i, next_idx))
+        weights = [max(1, len(blocks_with_times[k]["text"])) for k in unfilled]
+        total_w = sum(weights)
+        cursor = prev_end
+        for k, w in zip(unfilled, weights):
+            slice_len = gap * (w / total_w)
+            blocks_with_times[k]["start"] = cursor
+            blocks_with_times[k]["end"] = cursor + slice_len
+            cursor += slice_len
+    return blocks_with_times
 
 
 def align(audio_path: str, script_path: str, lang: str) -> List[dict]:
-    """Run forced alignment and return aligned blocks.
+    """Run Whisper-based forced alignment.
 
-    `lang` is "ko" or "ja". Script must be plain text with one block per line.
+    `lang` is "ko" or "ja". Script must be plain text with one block per line
+    (already normalized by the caller).
     """
-    aeneas_lang = LANG_MAP.get(lang)
-    if not aeneas_lang:
+    whisper_lang = LANG_TO_WHISPER.get(lang)
+    if not whisper_lang:
         raise ValueError(f"Unsupported language: {lang}")
 
-    config_string = (
-        f"task_language={aeneas_lang}|"
-        "is_text_type=plain|"
-        "os_task_file_format=json"
+    model = _get_model()
+
+    segments_iter, info = model.transcribe(
+        audio_path,
+        language=whisper_lang,
+        word_timestamps=True,
+        vad_filter=True,
+        beam_size=1,
+        condition_on_previous_text=False,
     )
 
-    rconf = RuntimeConfiguration()
-    rconf[RuntimeConfiguration.TTS] = "espeak-ng"
-    rconf[RuntimeConfiguration.TTS_PATH] = _espeak_ng_path()
-
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".json", delete=False, encoding="utf-8"
-    ) as tmp:
-        sync_map_path = tmp.name
-
-    try:
-        task = Task(config_string=config_string)
-        task.audio_file_path_absolute = audio_path
-        task.text_file_path_absolute = script_path
-        task.sync_map_file_path_absolute = sync_map_path
-
-        ExecuteTask(task, rconf=rconf).execute()
-        task.output_sync_map_file()
-
-        import json
-        with open(sync_map_path, "r", encoding="utf-8") as f:
-            sync_map = json.load(f)
-
-        blocks: List[AlignedBlock] = []
-        for i, fragment in enumerate(sync_map.get("fragments", [])):
-            text_lines = fragment.get("lines", [])
-            text = " ".join(line for line in text_lines if line).strip()
+    whisper_words: List[dict] = []
+    for seg in segments_iter:
+        for w in seg.words or []:
+            text = (w.word or "").strip()
             if not text:
                 continue
-            blocks.append(
-                AlignedBlock(
-                    index=i,
-                    start=float(fragment["begin"]),
-                    end=float(fragment["end"]),
-                    text=text,
-                )
-            )
-        return [b.to_dict() for b in blocks]
-    finally:
-        if os.path.exists(sync_map_path):
-            os.unlink(sync_map_path)
+            whisper_words.append({
+                "text": text,
+                "norm": _normalize(text),
+                "start": float(w.start),
+                "end": float(w.end),
+            })
+
+    audio_duration = float(getattr(info, "duration", 0.0) or 0.0)
+    if whisper_words and audio_duration <= 0:
+        audio_duration = whisper_words[-1]["end"]
+
+    with open(script_path, encoding="utf-8") as f:
+        script_lines = [ln.strip() for ln in f.read().splitlines() if ln.strip()]
+
+    if not script_lines:
+        return []
+
+    # Tokenize each script line into normalized words; remember ownership.
+    script_norm_words: List[str] = []
+    line_ranges: List[tuple] = []
+    for line in script_lines:
+        words = [_normalize(w) for w in re.split(r"\s+", line) if w.strip()]
+        words = [w for w in words if w]
+        s = len(script_norm_words)
+        script_norm_words.extend(words)
+        line_ranges.append((s, len(script_norm_words)))
+
+    if not script_norm_words or not whisper_words:
+        # Nothing to align — give every line equal share of audio duration.
+        per = max(audio_duration, 0.001) / len(script_lines)
+        return [
+            {
+                "index": i,
+                "start": round(i * per, 3),
+                "end": round((i + 1) * per, 3),
+                "text": line,
+            }
+            for i, line in enumerate(script_lines)
+        ]
+
+    whisper_norm = [w["norm"] for w in whisper_words]
+    mapping = _needleman_wunsch(script_norm_words, whisper_norm)
+
+    blocks_with_times: List[dict] = []
+    for line_idx, (s, e) in enumerate(line_ranges):
+        first_w = next(
+            (mapping[i] for i in range(s, e) if mapping[i] >= 0), None
+        )
+        last_w = next(
+            (mapping[i] for i in range(e - 1, s - 1, -1) if mapping[i] >= 0),
+            None,
+        )
+        start = whisper_words[first_w]["start"] if first_w is not None else None
+        end = whisper_words[last_w]["end"] if last_w is not None else None
+        # Guard against zero-length blocks
+        if start is not None and end is not None and end <= start:
+            end = start + 0.1
+        blocks_with_times.append({
+            "index": line_idx,
+            "start": start,
+            "end": end,
+            "text": script_lines[line_idx],
+        })
+
+    blocks_with_times = _interpolate_unmatched(blocks_with_times, audio_duration)
+
+    return [
+        {
+            "index": b["index"],
+            "start": round(b["start"] or 0.0, 3),
+            "end": round(b["end"] or (b["start"] or 0.0) + 0.1, 3),
+            "text": b["text"],
+        }
+        for b in blocks_with_times
+    ]

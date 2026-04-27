@@ -15,47 +15,38 @@ COPY frontend/ ./
 RUN npm run build
 
 
-# ---------- Stage 2: Python backend with aeneas ----------
+# ---------- Stage 2: Python backend with faster-whisper ----------
 FROM python:3.11-slim AS backend
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    AENEAS_WITH_CEW=False
+    HF_HOME=/app/.cache/huggingface \
+    WHISPER_MODEL=medium \
+    WHISPER_DEVICE=cpu \
+    WHISPER_COMPUTE=int8
 
-# System deps for aeneas: compiler, espeak-ng (TTS), ffmpeg (audio decode).
+# ffmpeg for audio decode/concat. No more aeneas/espeak/build chain.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential \
         ffmpeg \
-        espeak-ng \
-        libespeak-ng-dev \
-        curl \
         ca-certificates \
-    && rm -rf /var/lib/apk/lists/* /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Install numpy<2 first so aeneas's setup.py can find numpy headers.
-# Pin setuptools<70 — 74+ removed legacy Compiler signature that numpy.distutils still uses.
 RUN pip install --upgrade pip \
-    && pip install "setuptools==68.2.2" "wheel" \
-    && pip install "numpy<2"
-
-# Build aeneas from source with the setup.py patch (line 198 outer-bracket bug).
-RUN curl -L -o /tmp/aeneas.tar.gz https://files.pythonhosted.org/packages/source/a/aeneas/aeneas-1.7.3.0.tar.gz \
-    && tar -xzf /tmp/aeneas.tar.gz -C /tmp \
-    && sed -i "s|\[misc_util\.get_numpy_include_dirs()\]|misc_util.get_numpy_include_dirs()|" /tmp/aeneas-1.7.3.0/setup.py \
-    && pip install /tmp/aeneas-1.7.3.0 --no-build-isolation \
-    && rm -rf /tmp/aeneas*
-
-# Remaining backend deps (skip numpy/aeneas — already installed above).
-RUN pip install \
+    && pip install \
         fastapi==0.115.0 \
         "uvicorn[standard]==0.32.0" \
         python-multipart==0.0.12 \
         pydub==0.25.1 \
-        apscheduler==3.10.4
+        apscheduler==3.10.4 \
+        "faster-whisper==1.0.3"
+
+# Pre-download the Whisper model into the image so the first /align doesn't
+# pay the ~750MB download cost. Cached in /app/.cache/huggingface.
+RUN python -c "from faster_whisper import WhisperModel; WhisperModel('medium', device='cpu', compute_type='int8')"
 
 COPY backend/app ./app
 

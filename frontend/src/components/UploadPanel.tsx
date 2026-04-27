@@ -86,7 +86,9 @@ export default function UploadPanel({ onSubmit, disabled }: Props) {
         }`}
       >
         <p className="text-lg mb-2">대본(.txt)과 음성(.mp3/.wav)을 끌어다 놓으세요</p>
-        <p className="text-sm text-muted mb-1">합계 최대 50MB · 1~30분 분량</p>
+        <p className="text-sm text-muted mb-1">
+          합계 최대 50MB · 1~30분 분량 · Whisper 기반 정렬 (10분 음성 ≈ 2~5분 소요)
+        </p>
         <p className="text-xs text-accent/80 mb-6">
           💡 대본의 <b>줄바꿈(Enter)</b>이 자막 블록 1개의 기준이 됩니다 (빈 줄은 무시) ·
           음성 여러 개는 순서대로 이어붙여 정렬합니다
