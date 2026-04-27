@@ -44,9 +44,9 @@ RUN pip install --upgrade pip \
         apscheduler==3.10.4 \
         "faster-whisper==1.0.3"
 
-# Pre-download the Whisper model into the image so the first /align doesn't
-# pay the ~750MB download cost. Cached in /app/.cache/huggingface.
-RUN python -c "from faster_whisper import WhisperModel; WhisperModel('medium', device='cpu', compute_type='int8')"
+# Whisper model is fetched lazily on first /align call (cached at HF_HOME
+# for the container's lifetime). Pre-downloading at build time blew past
+# HF Spaces' build timeout — first user pays ~3min one-time stall instead.
 
 COPY backend/app ./app
 
