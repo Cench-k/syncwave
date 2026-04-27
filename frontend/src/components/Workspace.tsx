@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Block, Lang } from "@/lib/types";
 import { toSrt, toVtt, download, formatTime } from "@/lib/format";
 import { saveSession, clearSession } from "@/lib/storage";
+import { useToast } from "./Toast";
 import Waveform, { WaveControls } from "./Waveform";
 import ScriptList from "./ScriptList";
 
@@ -13,6 +14,8 @@ interface Props {
   onReset: () => void;
 }
 
+const NUDGE = 0.1;
+
 export default function Workspace({
   audioFile,
   initialBlocks,
@@ -21,9 +24,11 @@ export default function Workspace({
 }: Props) {
   const [blocks, setBlocks] = useState<Block[]>(initialBlocks);
   const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [rate, setRate] = useState(1.0);
   const controlsRef = useRef<WaveControls | null>(null);
+  const toast = useToast();
 
   const audioUrl = useMemo(() => URL.createObjectURL(audioFile), [audioFile]);
   useEffect(() => () => URL.revokeObjectURL(audioUrl), [audioUrl]);
@@ -35,7 +40,7 @@ export default function Workspace({
     return hit?.index ?? null;
   }, [blocks, currentTime]);
 
-  // Autosave to localStorage every minute
+  // Autosave to localStorage every minute (with toast)
   useEffect(() => {
     const id = setInterval(() => {
       saveSession({
@@ -45,9 +50,10 @@ export default function Workspace({
         blocks,
         savedAt: Date.now(),
       });
+      toast.show("💾 자동 저장됨");
     }, 60_000);
     return () => clearInterval(id);
-  }, [blocks, audioFile, lang]);
+  }, [blocks, audioFile, lang, toast]);
 
   // Warn before leaving
   useEffect(() => {
@@ -59,11 +65,38 @@ export default function Workspace({
     return () => window.removeEventListener("beforeunload", handler);
   }, []);
 
+  const updateBlock = useCallback(
+    (index: number, patch: Partial<Block>) => {
+      setBlocks((prev) =>
+        prev.map((b) => (b.index === index ? { ...b, ...patch } : b))
+      );
+    },
+    []
+  );
+
   // Keyboard shortcuts
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA") return;
+
+      // Nudge active block by 0.1s: Shift = start edge, Alt = end edge
+      if ((e.shiftKey || e.altKey) && (e.code === "ArrowLeft" || e.code === "ArrowRight")) {
+        if (activeIndex == null) return;
+        const dir = e.code === "ArrowRight" ? 1 : -1;
+        const block = blocks.find((b) => b.index === activeIndex);
+        if (!block) return;
+        e.preventDefault();
+        if (e.shiftKey) {
+          const start = Math.max(0, Math.min(block.end - 0.05, block.start + dir * NUDGE));
+          updateBlock(activeIndex, { start });
+        } else {
+          const end = Math.max(block.start + 0.05, block.end + dir * NUDGE);
+          updateBlock(activeIndex, { end });
+        }
+        return;
+      }
+
       if (e.code === "Space") {
         e.preventDefault();
         controlsRef.current?.playPause();
@@ -76,16 +109,7 @@ export default function Workspace({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [currentTime]);
-
-  const updateBlock = useCallback(
-    (index: number, patch: Partial<Block>) => {
-      setBlocks((prev) =>
-        prev.map((b) => (b.index === index ? { ...b, ...patch } : b))
-      );
-    },
-    []
-  );
+  }, [currentTime, activeIndex, blocks, updateBlock]);
 
   const handleJump = (index: number) => {
     const b = blocks.find((x) => x.index === index);
@@ -135,7 +159,7 @@ export default function Workspace({
           audioUrl={audioUrl}
           blocks={blocks}
           activeIndex={activeIndex}
-          onReady={() => {}}
+          onReady={(d) => setDuration(d)}
           onTimeUpdate={setCurrentTime}
           onRegionEdit={(idx, start, end) => updateBlock(idx, { start, end })}
           onRegionClick={(idx) => handleJump(idx)}
@@ -183,8 +207,13 @@ export default function Workspace({
               </button>
             ))}
           </div>
-          <div className="ml-auto font-mono text-sm text-muted">
-            {formatTime(currentTime)}
+          <div className="ml-auto flex items-center gap-3">
+            <span className="text-[11px] text-muted hidden md:inline">
+              Shift+◀▶ 시작 0.1s · Alt+◀▶ 끝 0.1s
+            </span>
+            <span className="font-mono text-sm text-muted">
+              {formatTime(currentTime)} / {formatTime(duration)}
+            </span>
           </div>
         </div>
       </section>

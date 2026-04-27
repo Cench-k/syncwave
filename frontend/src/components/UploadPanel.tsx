@@ -40,7 +40,10 @@ export default function UploadPanel({ onSubmit, disabled }: Props) {
         }`}
       >
         <p className="text-lg mb-2">대본(.txt)과 음성(.mp3/.wav)을 끌어다 놓으세요</p>
-        <p className="text-sm text-muted mb-6">최대 50MB · 1~30분 분량</p>
+        <p className="text-sm text-muted mb-1">최대 50MB · 1~30분 분량</p>
+        <p className="text-xs text-accent/80 mb-6">
+          💡 대본의 <b>줄바꿈(Enter)</b>이 자막 블록 1개의 기준이 됩니다 (빈 줄은 무시)
+        </p>
         <div className="flex gap-3 justify-center">
           <button
             onClick={() => audioRef.current?.click()}

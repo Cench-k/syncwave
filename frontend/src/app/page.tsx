@@ -3,9 +3,10 @@ import { useEffect, useState } from "react";
 import UploadPanel from "@/components/UploadPanel";
 import Workspace from "@/components/Workspace";
 import StatusOverlay from "@/components/StatusOverlay";
-import { Block, Lang } from "@/lib/types";
+import ResumePanel from "@/components/ResumePanel";
+import { Block, Lang, SavedSession } from "@/lib/types";
 import { alignFiles, pingHealth } from "@/lib/api";
-import { loadSession } from "@/lib/storage";
+import { loadSession, clearSession } from "@/lib/storage";
 
 type Phase =
   | { kind: "home" }
@@ -16,10 +17,10 @@ type Phase =
 
 export default function Home() {
   const [phase, setPhase] = useState<Phase>({ kind: "home" });
-  const [hasSavedSession, setHasSavedSession] = useState(false);
+  const [savedSession, setSavedSession] = useState<SavedSession | null>(null);
 
   useEffect(() => {
-    setHasSavedSession(loadSession() !== null);
+    setSavedSession(loadSession());
   }, []);
 
   async function handleSubmit(audio: File, script: File, lang: Lang) {
@@ -71,10 +72,22 @@ export default function Home() {
             disabled={phase.kind === "warming" || phase.kind === "aligning"}
           />
 
-          {hasSavedSession && (
-            <p className="text-center text-sm text-muted mt-6">
-              💾 이전 작업 내역이 로컬에 저장되어 있습니다
-            </p>
+          {savedSession && phase.kind === "home" && (
+            <ResumePanel
+              session={savedSession}
+              onResume={(audio) =>
+                setPhase({
+                  kind: "workspace",
+                  audio,
+                  blocks: savedSession.blocks,
+                  lang: savedSession.lang,
+                })
+              }
+              onDiscard={() => {
+                clearSession();
+                setSavedSession(null);
+              }}
+            />
           )}
 
           {phase.kind === "error" && (

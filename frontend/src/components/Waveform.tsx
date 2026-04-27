@@ -92,10 +92,16 @@ export default function Waveform({
         setRate: (r) => ws.setPlaybackRate(r),
         playRegion: (start, end) => {
           const d = ws.getDuration();
-          if (d > 0) {
-            ws.seekTo(start / d);
-            ws.play(start, end);
-          }
+          if (d <= 0) return;
+          ws.setTime(start);
+          const stop = (t: number) => {
+            if (t >= end) {
+              ws.pause();
+              ws.un("timeupdate", stop);
+            }
+          };
+          ws.on("timeupdate", stop);
+          ws.play();
         },
       });
     }
