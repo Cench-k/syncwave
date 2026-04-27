@@ -8,6 +8,7 @@ Endpoints:
 from __future__ import annotations
 
 import os
+import re
 import secrets
 import shutil
 import uuid
@@ -22,9 +23,10 @@ if os.path.isdir(_ESPEAK_DIR) and _ESPEAK_DIR not in os.environ.get("PATH", ""):
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
+from pydub import AudioSegment
 
 from .aligner import align
 from .cleanup import sweep_temp
@@ -99,31 +101,53 @@ def _ext(name: str) -> str:
 
 @app.post("/align", dependencies=[Depends(require_auth)])
 async def align_endpoint(
-    audio: UploadFile = File(...),
+    audios: list[UploadFile] = File(...),
     script: UploadFile = File(...),
     lang: str = Form(...),
 ):
     if lang not in ALLOWED_LANGS:
         raise HTTPException(400, f"lang must be one of {ALLOWED_LANGS}")
-    if _ext(audio.filename) not in ALLOWED_AUDIO_EXT:
-        raise HTTPException(400, "audio must be .mp3 or .wav")
+    if not audios:
+        raise HTTPException(400, "at least one audio file required")
+    for a in audios:
+        if _ext(a.filename) not in ALLOWED_AUDIO_EXT:
+            raise HTTPException(400, f"audio must be .mp3 or .wav: {a.filename}")
     if _ext(script.filename) not in ALLOWED_SCRIPT_EXT:
         raise HTTPException(400, "script must be .txt")
 
     job_id = uuid.uuid4().hex
     job_dir = TEMP_DIR / job_id
     job_dir.mkdir()
-    audio_path = job_dir / f"audio{_ext(audio.filename)}"
+    parts_dir = job_dir / "parts"
+    parts_dir.mkdir()
+    combined_path = job_dir / "combined.mp3"
     script_path = job_dir / "script.txt"
 
+    success = False
     try:
-        size = 0
-        with audio_path.open("wb") as f:
-            while chunk := await audio.read(1024 * 1024):
-                size += len(chunk)
-                if size > MAX_AUDIO_BYTES:
-                    raise HTTPException(413, "audio exceeds 50MB limit")
-                f.write(chunk)
+        # Save each audio part with the client-sent order preserved.
+        total = 0
+        part_paths: list[Path] = []
+        for i, a in enumerate(audios):
+            part_path = parts_dir / f"{i:04d}{_ext(a.filename)}"
+            with part_path.open("wb") as f:
+                while chunk := await a.read(1024 * 1024):
+                    total += len(chunk)
+                    if total > MAX_AUDIO_BYTES:
+                        raise HTTPException(413, "combined audio exceeds 50MB limit")
+                    f.write(chunk)
+            part_paths.append(part_path)
+
+        # Concatenate parts with pydub (uses ffmpeg under the hood for mp3).
+        combined: AudioSegment | None = None
+        for p in part_paths:
+            seg = AudioSegment.from_file(p)
+            combined = seg if combined is None else combined + seg
+        assert combined is not None
+        combined.export(combined_path, format="mp3")
+
+        # Drop the originals — we only need the combined file from here on.
+        shutil.rmtree(parts_dir, ignore_errors=True)
 
         script_bytes = await script.read()
         try:
@@ -137,14 +161,40 @@ async def align_endpoint(
             raise HTTPException(400, "script is empty after normalization")
         script_path.write_text(normalized, encoding="utf-8")
 
-        blocks = align(str(audio_path), str(script_path), lang)
-        return JSONResponse({"job_id": job_id, "blocks": blocks})
+        blocks = align(str(combined_path), str(script_path), lang)
+
+        # Keep combined.mp3 for client download; drop the script.
+        try:
+            script_path.unlink()
+        except OSError:
+            pass
+
+        success = True
+        return JSONResponse({
+            "job_id": job_id,
+            "blocks": blocks,
+            "audio_url": f"/audio/{job_id}",
+        })
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(500, f"alignment failed: {e}") from e
     finally:
-        shutil.rmtree(job_dir, ignore_errors=True)
+        if not success:
+            shutil.rmtree(job_dir, ignore_errors=True)
+
+
+_JOB_ID_RE = re.compile(r"^[a-f0-9]{32}$")
+
+
+@app.get("/audio/{job_id}", dependencies=[Depends(require_auth)])
+async def get_combined_audio(job_id: str):
+    if not _JOB_ID_RE.match(job_id):
+        raise HTTPException(400, "invalid job_id")
+    audio_path = TEMP_DIR / job_id / "combined.mp3"
+    if not audio_path.is_file():
+        raise HTTPException(404, "audio expired or not found")
+    return FileResponse(audio_path, media_type="audio/mpeg", filename="combined.mp3")
 
 
 # Serve the built frontend (Next.js static export) at the root.
@@ -157,7 +207,11 @@ if STATIC_DIR.is_dir():
         class StaticAuthMiddleware(BaseHTTPMiddleware):
             async def dispatch(self, request, call_next):
                 path = request.url.path
-                if path == "/health" or path.startswith("/align"):
+                if (
+                    path == "/health"
+                    or path.startswith("/align")
+                    or path.startswith("/audio/")
+                ):
                     return await call_next(request)
                 auth = request.headers.get("authorization", "")
                 if not auth.lower().startswith("basic "):

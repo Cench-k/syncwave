@@ -10,6 +10,7 @@ export interface Block {
 export interface AlignResponse {
   job_id: string;
   blocks: Block[];
+  audio_url: string;
 }
 
 export interface SavedSession {

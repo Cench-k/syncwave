@@ -3,12 +3,12 @@ import { AlignResponse, Lang } from "./types";
 const BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
 
 export async function alignFiles(
-  audio: File,
+  audios: File[],
   script: File,
   lang: Lang
 ): Promise<AlignResponse> {
   const fd = new FormData();
-  fd.append("audio", audio);
+  for (const a of audios) fd.append("audios", a);
   fd.append("script", script);
   fd.append("lang", lang);
 
@@ -18,6 +18,18 @@ export async function alignFiles(
     throw new Error(`Align failed (${res.status}): ${detail}`);
   }
   return res.json();
+}
+
+export async function fetchCombinedAudio(
+  audioUrl: string,
+  fileName: string
+): Promise<File> {
+  const res = await fetch(`${BASE}${audioUrl}`);
+  if (!res.ok) {
+    throw new Error(`Failed to fetch combined audio (${res.status})`);
+  }
+  const blob = await res.blob();
+  return new File([blob], fileName, { type: "audio/mpeg" });
 }
 
 export async function pingHealth(timeoutMs = 60_000): Promise<boolean> {

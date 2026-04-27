@@ -5,7 +5,7 @@ import Workspace from "@/components/Workspace";
 import StatusOverlay from "@/components/StatusOverlay";
 import ResumePanel from "@/components/ResumePanel";
 import { Block, Lang, SavedSession } from "@/lib/types";
-import { alignFiles, pingHealth } from "@/lib/api";
+import { alignFiles, fetchCombinedAudio, pingHealth } from "@/lib/api";
 import { loadSession, clearSession } from "@/lib/storage";
 
 type Phase =
@@ -23,7 +23,7 @@ export default function Home() {
     setSavedSession(loadSession());
   }, []);
 
-  async function handleSubmit(audio: File, script: File, lang: Lang) {
+  async function handleSubmit(audios: File[], script: File, lang: Lang) {
     setPhase({ kind: "warming" });
     const ok = await pingHealth();
     if (!ok) {
@@ -32,8 +32,14 @@ export default function Home() {
     }
     setPhase({ kind: "aligning" });
     try {
-      const res = await alignFiles(audio, script, lang);
-      setPhase({ kind: "workspace", audio, blocks: res.blocks, lang });
+      const res = await alignFiles(audios, script, lang);
+      // Use the script filename (or first audio) as the base name for downloads.
+      const baseName =
+        audios.length === 1
+          ? audios[0].name
+          : `${audios[0].name.replace(/\.[^.]+$/, "")}_combined.mp3`;
+      const combined = await fetchCombinedAudio(res.audio_url, baseName);
+      setPhase({ kind: "workspace", audio: combined, blocks: res.blocks, lang });
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       setPhase({ kind: "error", message: msg });
