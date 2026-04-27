@@ -37,15 +37,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Install numpy<2 first so aeneas's setup.py can find numpy headers.
-RUN pip install --upgrade pip setuptools wheel \
+# Pin setuptools<70 — 74+ removed legacy Compiler signature that numpy.distutils still uses.
+RUN pip install --upgrade pip \
+    && pip install "setuptools==68.2.2" "wheel" \
     && pip install "numpy<2"
 
 # Build aeneas from source with the setup.py patch (line 198 outer-bracket bug).
-RUN pip download aeneas==1.7.3.0 --no-deps --no-binary=:all: --dest /tmp/aeneas-src --no-build-isolation \
-    && tar -xzf /tmp/aeneas-src/aeneas-1.7.3.0.tar.gz -C /tmp/aeneas-src \
-    && sed -i "s|\[misc_util\.get_numpy_include_dirs()\]|misc_util.get_numpy_include_dirs()|" /tmp/aeneas-src/aeneas-1.7.3.0/setup.py \
-    && pip install /tmp/aeneas-src/aeneas-1.7.3.0 --no-build-isolation \
-    && rm -rf /tmp/aeneas-src
+RUN curl -L -o /tmp/aeneas.tar.gz https://files.pythonhosted.org/packages/source/a/aeneas/aeneas-1.7.3.0.tar.gz \
+    && tar -xzf /tmp/aeneas.tar.gz -C /tmp \
+    && sed -i "s|\[misc_util\.get_numpy_include_dirs()\]|misc_util.get_numpy_include_dirs()|" /tmp/aeneas-1.7.3.0/setup.py \
+    && pip install /tmp/aeneas-1.7.3.0 --no-build-isolation \
+    && rm -rf /tmp/aeneas*
 
 # Remaining backend deps (skip numpy/aeneas — already installed above).
 RUN pip install \
