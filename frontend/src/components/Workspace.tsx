@@ -74,6 +74,20 @@ export default function Workspace({
     []
   );
 
+  const shiftAll = useCallback((delta: number) => {
+    setBlocks((prev) => {
+      // Clamp so the earliest block's start never goes below 0.
+      const minStart = Math.min(...prev.map((b) => b.start));
+      const applied = Math.max(delta, -minStart);
+      if (applied === 0) return prev;
+      return prev.map((b) => ({
+        ...b,
+        start: b.start + applied,
+        end: b.end + applied,
+      }));
+    });
+  }, []);
+
   // Keyboard shortcuts
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -215,6 +229,25 @@ export default function Workspace({
               {formatTime(currentTime)} / {formatTime(duration)}
             </span>
           </div>
+        </div>
+
+        {/* Global shift — bulk offset for whole subtitle track */}
+        <div className="flex items-center gap-2 mt-2 text-xs">
+          <span className="text-muted">전체 자막 보정:</span>
+          {[-0.5, -0.1, +0.1, +0.5].map((d) => (
+            <button
+              key={d}
+              onClick={() => shiftAll(d)}
+              className="px-2 py-0.5 border border-border rounded hover:border-accent text-muted hover:text-white"
+              title={`모든 자막을 ${d > 0 ? "+" : ""}${d}초 이동`}
+            >
+              {d > 0 ? "+" : ""}
+              {d}s
+            </button>
+          ))}
+          <span className="text-muted/60 ml-1 hidden md:inline">
+            (전체가 일정하게 밀려있을 때 사용)
+          </span>
         </div>
       </section>
 

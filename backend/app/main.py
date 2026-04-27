@@ -11,6 +11,7 @@ import os
 import re
 import secrets
 import shutil
+import subprocess
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -138,13 +139,31 @@ async def align_endpoint(
                     f.write(chunk)
             part_paths.append(part_path)
 
-        # Concatenate parts with pydub (uses ffmpeg under the hood for mp3).
-        combined: AudioSegment | None = None
-        for p in part_paths:
-            seg = AudioSegment.from_file(p)
-            combined = seg if combined is None else combined + seg
-        assert combined is not None
-        combined.export(combined_path, format="mp3")
+        # Prefer ffmpeg concat demuxer with stream copy: no re-encode means
+        # no LAME encoder-delay padding gets accumulated between parts (pydub
+        # `+` operator decodes to PCM and re-encodes, which drifts ~26ms per
+        # part for mp3). Requires uniform codec/sample-rate/channels across
+        # parts. Falls back to pydub if ffmpeg refuses.
+        list_path = job_dir / "concat.txt"
+        list_path.write_text(
+            "".join(f"file '{p.as_posix()}'\n" for p in part_paths),
+            encoding="utf-8",
+        )
+        proc = subprocess.run(
+            [
+                "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                "-i", str(list_path), "-c", "copy", str(combined_path),
+            ],
+            capture_output=True, text=True,
+        )
+        list_path.unlink(missing_ok=True)
+        if proc.returncode != 0 or not combined_path.exists():
+            combined: AudioSegment | None = None
+            for p in part_paths:
+                seg = AudioSegment.from_file(p)
+                combined = seg if combined is None else combined + seg
+            assert combined is not None
+            combined.export(combined_path, format="mp3")
 
         # Drop the originals — we only need the combined file from here on.
         shutil.rmtree(parts_dir, ignore_errors=True)
