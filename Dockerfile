@@ -42,7 +42,8 @@ RUN pip install --upgrade pip \
         python-multipart==0.0.12 \
         pydub==0.25.1 \
         apscheduler==3.10.4 \
-        "faster-whisper==1.0.3"
+        "faster-whisper==1.0.3" \
+        requests
 
 # Whisper model is fetched lazily on first /align call (cached at HF_HOME
 # for the container's lifetime). Pre-downloading at build time blew past
