@@ -17,7 +17,19 @@ export async function alignFiles(
     const detail = await res.text().catch(() => "");
     throw new Error(`Align failed (${res.status}): ${detail}`);
   }
-  return res.json();
+  const { job_id } = await res.json();
+
+  // Poll /status/{job_id} until done
+  while (true) {
+    await new Promise((r) => setTimeout(r, 3000));
+    const statusRes = await fetch(`${BASE}/status/${job_id}`);
+    if (!statusRes.ok) {
+      const detail = await statusRes.text().catch(() => "");
+      throw new Error(`Status check failed (${statusRes.status}): ${detail}`);
+    }
+    const data = await statusRes.json();
+    if (data.status === "done") return data as AlignResponse;
+  }
 }
 
 export async function fetchCombinedAudio(

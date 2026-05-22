@@ -13,8 +13,10 @@ import secrets
 import shutil
 import subprocess
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 # Ensure espeak-ng is on PATH for the aeneas subprocess calls.
 _ESPEAK_DIR = r"C:\Program Files\eSpeak NG"
@@ -43,6 +45,9 @@ APP_PASS = os.environ.get("APP_PASS", "")
 AUTH_ENABLED = bool(APP_PASS)
 
 MAX_AUDIO_BYTES = 50 * 1024 * 1024  # 50 MB
+
+_jobs: dict[str, dict[str, Any]] = {}
+_executor = ThreadPoolExecutor(max_workers=2)
 ALLOWED_AUDIO_EXT = {".mp3", ".wav"}
 ALLOWED_SCRIPT_EXT = {".txt"}
 ALLOWED_LANGS = {"ko", "ja"}
@@ -124,9 +129,7 @@ async def align_endpoint(
     combined_path = job_dir / "combined.mp3"
     script_path = job_dir / "script.txt"
 
-    success = False
     try:
-        # Save each audio part with the client-sent order preserved.
         total = 0
         part_paths: list[Path] = []
         for i, a in enumerate(audios):
@@ -139,11 +142,6 @@ async def align_endpoint(
                     f.write(chunk)
             part_paths.append(part_path)
 
-        # Prefer ffmpeg concat demuxer with stream copy: no re-encode means
-        # no LAME encoder-delay padding gets accumulated between parts (pydub
-        # `+` operator decodes to PCM and re-encodes, which drifts ~26ms per
-        # part for mp3). Requires uniform codec/sample-rate/channels across
-        # parts. Falls back to pydub if ffmpeg refuses.
         list_path = job_dir / "concat.txt"
         list_path.write_text(
             "".join(f"file '{p.as_posix()}'\n" for p in part_paths),
@@ -165,7 +163,6 @@ async def align_endpoint(
             assert combined is not None
             combined.export(combined_path, format="mp3")
 
-        # Drop the originals — we only need the combined file from here on.
         shutil.rmtree(parts_dir, ignore_errors=True)
 
         script_bytes = await script.read()
@@ -180,27 +177,48 @@ async def align_endpoint(
             raise HTTPException(400, "script is empty after normalization")
         script_path.write_text(normalized, encoding="utf-8")
 
-        blocks = align(str(combined_path), str(script_path), lang)
-
-        # Keep combined.mp3 for client download; drop the script.
-        try:
-            script_path.unlink()
-        except OSError:
-            pass
-
-        success = True
-        return JSONResponse({
-            "job_id": job_id,
-            "blocks": blocks,
-            "audio_url": f"/audio/{job_id}",
-        })
     except HTTPException:
+        shutil.rmtree(job_dir, ignore_errors=True)
         raise
     except Exception as e:
-        raise HTTPException(500, f"alignment failed: {e}") from e
-    finally:
-        if not success:
+        shutil.rmtree(job_dir, ignore_errors=True)
+        raise HTTPException(500, f"upload failed: {e}") from e
+
+    # Run Whisper alignment in background so the HTTP connection doesn't time out.
+    _jobs[job_id] = {"status": "pending"}
+
+    def _run():
+        try:
+            blocks = align(str(combined_path), str(script_path), lang)
+            try:
+                script_path.unlink()
+            except OSError:
+                pass
+            _jobs[job_id] = {"status": "done", "blocks": blocks}
+        except Exception as exc:
             shutil.rmtree(job_dir, ignore_errors=True)
+            _jobs[job_id] = {"status": "error", "error": str(exc)}
+
+    _executor.submit(_run)
+    return JSONResponse({"job_id": job_id, "status": "pending"})
+
+
+@app.get("/status/{job_id}", dependencies=[Depends(require_auth)])
+async def get_status(job_id: str):
+    if not _JOB_ID_RE.match(job_id):
+        raise HTTPException(400, "invalid job_id")
+    job = _jobs.get(job_id)
+    if job is None:
+        raise HTTPException(404, "job not found")
+    if job["status"] == "done":
+        return JSONResponse({
+            "status": "done",
+            "blocks": job["blocks"],
+            "audio_url": f"/audio/{job_id}",
+        })
+    if job["status"] == "error":
+        raise HTTPException(500, f"alignment failed: {job['error']}")
+    return JSONResponse({"status": "pending"})
 
 
 _JOB_ID_RE = re.compile(r"^[a-f0-9]{32}$")
@@ -229,6 +247,7 @@ if STATIC_DIR.is_dir():
                 if (
                     path == "/health"
                     or path.startswith("/align")
+                    or path.startswith("/status/")
                     or path.startswith("/audio/")
                 ):
                     return await call_next(request)
