@@ -42,9 +42,11 @@ from .cleanup import sweep_temp
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-TEMP_DIR = BASE_DIR / "temp"
-TEMP_DIR.mkdir(exist_ok=True)
-STATIC_DIR = BASE_DIR / "static"
+# Overridable so a packaged build can point these at a writable location —
+# inside a PyInstaller bundle __file__ lives in a read-only extraction dir.
+TEMP_DIR = Path(os.environ.get("SYNCWAVE_TEMP_DIR") or (BASE_DIR / "temp"))
+TEMP_DIR.mkdir(parents=True, exist_ok=True)
+STATIC_DIR = Path(os.environ.get("SYNCWAVE_STATIC_DIR") or (BASE_DIR / "static"))
 
 APP_USER = os.environ.get("APP_USER", "")
 APP_PASS = os.environ.get("APP_PASS", "")

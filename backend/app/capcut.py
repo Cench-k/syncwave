@@ -239,7 +239,10 @@ def build_speech_audio(draft: dict, out_path: str, only_paths: Optional[Iterable
                         f"음성 조각 추출 실패 ({os.path.basename(path)} @{seg['src']:.2f}s): "
                         + (proc.stderr or "")[-300:]
                     )
-                audio = AudioSegment.from_file(piece)
+                # format="wav" makes pydub use its own wav reader; without it
+                # it shells out to ffprobe to sniff the format, which would
+                # mean shipping a second 200MB binary in the desktop build.
+                audio = AudioSegment.from_file(piece, format="wav")
                 if abs(seg["volume"] - 1.0) > 1e-6 and seg["volume"] > 0:
                     audio = audio + (20 * math.log10(seg["volume"]))
                 timeline = timeline.overlay(audio, position=int(round(seg["tl"] * 1000)))

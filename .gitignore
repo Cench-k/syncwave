@@ -21,3 +21,6 @@ backend/static/
 # OS
 .DS_Store
 Thumbs.db
+backend/ffmpeg/
+dist/
+build/
