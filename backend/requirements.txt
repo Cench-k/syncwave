@@ -1,7 +1,9 @@
 fastapi==0.115.0
 uvicorn[standard]==0.32.0
 python-multipart==0.0.12
-numpy<2
-aeneas==1.7.3.0
 pydub==0.25.1
 apscheduler==3.10.4
+faster-whisper==1.0.3
+# faster-whisper imports requests, but newer huggingface_hub no longer pulls
+# it in transitively — keep it explicit (same reason as in the Dockerfile).
+requests

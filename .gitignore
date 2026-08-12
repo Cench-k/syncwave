@@ -8,6 +8,7 @@ __pycache__/
 node_modules/
 .next/
 out/
+*.tsbuildinfo
 .env*.local
 
 # Backend temp

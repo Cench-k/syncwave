@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import WaveSurfer from "wavesurfer.js";
 import RegionsPlugin from "wavesurfer.js/dist/plugins/regions.js";
 import TimelinePlugin from "wavesurfer.js/dist/plugins/timeline.js";
@@ -25,6 +25,12 @@ export interface WaveControls {
   playRegion: (start: number, end: number) => void;
 }
 
+type RegionsAPI = ReturnType<typeof RegionsPlugin.create>;
+type RegionHandle = ReturnType<RegionsAPI["addRegion"]>;
+
+const REGION_IDLE = "rgba(94,234,212,0.12)";
+const REGION_ACTIVE = "rgba(94,234,212,0.30)";
+
 export default function Waveform({
   audioUrl,
   blocks,
@@ -37,9 +43,13 @@ export default function Waveform({
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WaveSurfer | null>(null);
-  const regionsRef = useRef<ReturnType<typeof RegionsPlugin.create> | null>(null);
+  const regionsRef = useRef<RegionsAPI | null>(null);
+  const regionMapRef = useRef(new Map<number, RegionHandle>());
   const blocksRef = useRef(blocks);
   blocksRef.current = blocks;
+  // Regions positioned before the audio is decoded land against a zero
+  // duration, so hold them back until wavesurfer reports ready.
+  const [ready, setReady] = useState(false);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -68,8 +78,13 @@ export default function Waveform({
     wsRef.current = ws;
     regionsRef.current = regions;
 
-    ws.on("ready", () => onReady(ws.getDuration()));
+    setReady(false);
+    ws.on("ready", () => {
+      setReady(true);
+      onReady(ws.getDuration());
+    });
     ws.on("timeupdate", (t) => onTimeUpdate(t));
+    ws.on("error", (e) => console.error("[Waveform] load failed", e));
 
     regions.on("region-updated", (region) => {
       const idx = Number(region.id);
@@ -110,28 +125,56 @@ export default function Waveform({
       ws.destroy();
       wsRef.current = null;
       regionsRef.current = null;
+      regionMapRef.current.clear();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [audioUrl]);
 
-  // Sync regions whenever blocks change
+  // Rebuild regions when the block geometry changes.
   useEffect(() => {
     const regions = regionsRef.current;
-    if (!regions) return;
+    if (!regions || !ready) return;
     regions.clearRegions();
+    const map = new Map<number, RegionHandle>();
     for (const b of blocks) {
-      const isActive = activeIndex === b.index;
-      regions.addRegion({
-        id: String(b.index),
-        start: b.start,
-        end: b.end,
-        color: isActive ? "rgba(94,234,212,0.30)" : "rgba(94,234,212,0.12)",
-        drag: true,
-        resize: true,
-        content: String(b.index + 1),
-      });
+      map.set(
+        b.index,
+        regions.addRegion({
+          id: String(b.index),
+          start: b.start,
+          end: b.end,
+          color: b.index === activeIndex ? REGION_ACTIVE : REGION_IDLE,
+          drag: true,
+          resize: true,
+          content: String(b.index + 1),
+        })
+      );
     }
-  }, [blocks, activeIndex]);
+    regionMapRef.current = map;
+    // activeIndex is intentionally omitted: it changes on every timeupdate,
+    // and tearing down every region several times a second made the waveform
+    // unusable during playback. Highlighting is handled below instead.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [blocks, ready]);
+
+  // Recolour only the regions whose highlight state actually changed.
+  const prevActiveRef = useRef<number | null>(null);
+  useEffect(() => {
+    const map = regionMapRef.current;
+    const paint = (idx: number | null, color: string) => {
+      if (idx === null) return;
+      const region = map.get(idx);
+      const block = blocksRef.current.find((b) => b.index === idx);
+      if (region && block) {
+        region.setOptions({ start: block.start, end: block.end, color });
+      }
+    };
+    if (prevActiveRef.current !== activeIndex) {
+      paint(prevActiveRef.current, REGION_IDLE);
+      paint(activeIndex, REGION_ACTIVE);
+      prevActiveRef.current = activeIndex;
+    }
+  }, [activeIndex, blocks]);
 
   return <div ref={containerRef} className="w-full" />;
 }

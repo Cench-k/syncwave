@@ -2,10 +2,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Block, Lang } from "@/lib/types";
 import { toSrt, toVtt, download, formatTime } from "@/lib/format";
-import { saveSession, clearSession } from "@/lib/storage";
+import { ShapeOptions, DEFAULT_SHAPE, shapeBlocks } from "@/lib/shape";
+import { saveSession, clearSession, loadShape, saveShape } from "@/lib/storage";
 import { useToast } from "./Toast";
 import Waveform, { WaveControls } from "./Waveform";
 import ScriptList from "./ScriptList";
+import ExportPanel from "./ExportPanel";
 
 interface Props {
   audioFile: File;
@@ -27,18 +29,52 @@ export default function Workspace({
   const [duration, setDuration] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [rate, setRate] = useState(1.0);
+  const [shape, setShape] = useState<ShapeOptions>(DEFAULT_SHAPE);
+  const [showPanel, setShowPanel] = useState(false);
+  const [preview, setPreview] = useState(true);
   const controlsRef = useRef<WaveControls | null>(null);
   const toast = useToast();
 
-  const audioUrl = useMemo(() => URL.createObjectURL(audioFile), [audioFile]);
-  useEffect(() => () => URL.revokeObjectURL(audioUrl), [audioUrl]);
+  // Shaping settings are a per-user preference, not per-session data.
+  useEffect(() => {
+    const saved = loadShape();
+    if (saved) setShape(saved);
+  }, []);
+
+  const patchShape = useCallback((patch: Partial<ShapeOptions>) => {
+    setShape((prev) => {
+      const next = { ...prev, ...patch };
+      saveShape(next);
+      return next;
+    });
+  }, []);
+
+  // Create and revoke in one effect. Deriving the URL from useMemo and
+  // revoking it from a separate effect breaks under StrictMode's dev
+  // double-mount: the cleanup revokes the URL, the remount finds useMemo's
+  // deps unchanged and hands back the now-dead URL, and wavesurfer silently
+  // fetches nothing. Tying both to the same effect re-creates it on remount.
+  const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  useEffect(() => {
+    const url = URL.createObjectURL(audioFile);
+    setAudioUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [audioFile]);
+
+  // `blocks` stays the raw alignment result so edits and re-shaping never
+  // compound; shaping is a pure view/export transform on top of it.
+  const shaped = useMemo(
+    () => shapeBlocks(blocks, shape, duration),
+    [blocks, shape, duration]
+  );
+  const view = preview ? shaped : blocks;
 
   const activeIndex = useMemo(() => {
-    const hit = blocks.find(
+    const hit = view.find(
       (b) => currentTime >= b.start && currentTime < b.end
     );
     return hit?.index ?? null;
-  }, [blocks, currentTime]);
+  }, [view, currentTime]);
 
   // Autosave to localStorage every minute (with toast)
   useEffect(() => {
@@ -126,7 +162,7 @@ export default function Workspace({
   }, [currentTime, activeIndex, blocks, updateBlock]);
 
   const handleJump = (index: number) => {
-    const b = blocks.find((x) => x.index === index);
+    const b = view.find((x) => x.index === index);
     if (b) controlsRef.current?.playRegion(b.start, b.end);
   };
 
@@ -153,13 +189,21 @@ export default function Workspace({
         </div>
         <div className="flex gap-2">
           <button
-            onClick={() => download(`${baseName}.srt`, toSrt(blocks))}
+            onClick={() => setShowPanel((v) => !v)}
+            className={`px-3 py-1.5 text-sm rounded border ${
+              showPanel ? "border-accent text-accent" : "border-border hover:border-accent"
+            }`}
+          >
+            ⚙ 구간 다듬기
+          </button>
+          <button
+            onClick={() => download(`${baseName}.srt`, toSrt(shaped))}
             className="px-3 py-1.5 text-sm rounded bg-accent text-bg font-medium"
           >
             .srt 다운로드
           </button>
           <button
-            onClick={() => download(`${baseName}.vtt`, toVtt(blocks))}
+            onClick={() => download(`${baseName}.vtt`, toVtt(shaped))}
             className="px-3 py-1.5 text-sm rounded border border-border hover:border-accent"
           >
             .vtt
@@ -167,18 +211,37 @@ export default function Workspace({
         </div>
       </header>
 
+      {showPanel && (
+        <section className="px-6 py-3 border-b border-border bg-panel/80">
+          <ExportPanel
+            raw={blocks}
+            shaped={shaped}
+            opts={shape}
+            onChange={patchShape}
+            preview={preview}
+            onPreviewChange={setPreview}
+          />
+        </section>
+      )}
+
       {/* Waveform */}
       <section className="px-6 py-4 border-b border-border bg-panel/50">
-        <Waveform
-          audioUrl={audioUrl}
-          blocks={blocks}
-          activeIndex={activeIndex}
-          onReady={(d) => setDuration(d)}
-          onTimeUpdate={setCurrentTime}
-          onRegionEdit={(idx, start, end) => updateBlock(idx, { start, end })}
-          onRegionClick={(idx) => handleJump(idx)}
-          registerControls={(c) => (controlsRef.current = c)}
-        />
+        {audioUrl ? (
+          <Waveform
+            audioUrl={audioUrl}
+            blocks={view}
+            activeIndex={activeIndex}
+            onReady={(d) => setDuration(d)}
+            onTimeUpdate={setCurrentTime}
+            onRegionEdit={(idx, start, end) => updateBlock(idx, { start, end })}
+            onRegionClick={(idx) => handleJump(idx)}
+            registerControls={(c) => (controlsRef.current = c)}
+          />
+        ) : (
+          <div className="h-[120px] flex items-center justify-center text-muted text-sm">
+            음성 불러오는 중…
+          </div>
+        )}
 
         {/* Transport */}
         <div className="flex items-center gap-3 mt-3">
@@ -254,7 +317,7 @@ export default function Workspace({
       {/* Script list */}
       <section className="flex-1 min-h-0">
         <ScriptList
-          blocks={blocks}
+          blocks={view}
           activeIndex={activeIndex}
           onJump={handleJump}
           onTextChange={(idx, text) => updateBlock(idx, { text })}
