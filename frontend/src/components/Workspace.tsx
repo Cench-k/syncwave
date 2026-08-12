@@ -8,12 +8,15 @@ import { useToast } from "./Toast";
 import Waveform, { WaveControls } from "./Waveform";
 import ScriptList from "./ScriptList";
 import ExportPanel from "./ExportPanel";
+import CapCutWriteButton from "./CapCutWriteButton";
 
 interface Props {
   audioFile: File;
   initialBlocks: Block[];
   lang: Lang;
   onReset: () => void;
+  /** Set when the alignment came from a CapCut project, enabling write-back. */
+  capcutProject?: string | null;
 }
 
 const NUDGE = 0.1;
@@ -23,6 +26,7 @@ export default function Workspace({
   initialBlocks,
   lang,
   onReset,
+  capcutProject = null,
 }: Props) {
   const [blocks, setBlocks] = useState<Block[]>(initialBlocks);
   const [currentTime, setCurrentTime] = useState(0);
@@ -196,9 +200,20 @@ export default function Workspace({
           >
             ⚙ 구간 다듬기
           </button>
+          {capcutProject && (
+            <CapCutWriteButton
+              project={capcutProject}
+              blocks={shaped}
+              onDone={(m) => toast.show(`✅ ${m}`)}
+            />
+          )}
           <button
             onClick={() => download(`${baseName}.srt`, toSrt(shaped))}
-            className="px-3 py-1.5 text-sm rounded bg-accent text-bg font-medium"
+            className={`px-3 py-1.5 text-sm rounded font-medium ${
+              capcutProject
+                ? "border border-border hover:border-accent"
+                : "bg-accent text-bg"
+            }`}
           >
             .srt 다운로드
           </button>

@@ -4,24 +4,62 @@ import UploadPanel from "@/components/UploadPanel";
 import Workspace from "@/components/Workspace";
 import StatusOverlay from "@/components/StatusOverlay";
 import ResumePanel from "@/components/ResumePanel";
+import CapCutPanel from "@/components/CapCutPanel";
 import { Block, Lang, SavedSession } from "@/lib/types";
-import { alignFiles, fetchCombinedAudio, pingHealth } from "@/lib/api";
+import {
+  alignFiles,
+  alignAgainstCapCut,
+  fetchCombinedAudio,
+  isLocalBackend,
+  pingHealth,
+} from "@/lib/api";
 import { loadSession, clearSession } from "@/lib/storage";
 
 type Phase =
   | { kind: "home" }
   | { kind: "warming" }
   | { kind: "aligning" }
-  | { kind: "workspace"; audio: File; blocks: Block[]; lang: Lang }
+  | {
+      kind: "workspace";
+      audio: File;
+      blocks: Block[];
+      lang: Lang;
+      capcutProject?: string | null;
+    }
   | { kind: "error"; message: string };
+
+type Mode = "file" | "capcut";
 
 export default function Home() {
   const [phase, setPhase] = useState<Phase>({ kind: "home" });
   const [savedSession, setSavedSession] = useState<SavedSession | null>(null);
+  const [local, setLocal] = useState(false);
+  const [mode, setMode] = useState<Mode>("file");
+  const [lang, setLang] = useState<Lang>("ko");
 
   useEffect(() => {
     setSavedSession(loadSession());
+    // The CapCut tab only makes sense against a backend running on this
+    // machine; the hosted deployment does not register those routes at all.
+    isLocalBackend().then(setLocal);
   }, []);
+
+  async function handleCapCutSubmit(project: string, script: File, l: Lang) {
+    setPhase({ kind: "aligning" });
+    try {
+      const res = await alignAgainstCapCut(project, script, l);
+      const audio = await fetchCombinedAudio(res.audio_url, `${project}.mp3`);
+      setPhase({
+        kind: "workspace",
+        audio,
+        blocks: res.blocks,
+        lang: l,
+        capcutProject: project,
+      });
+    } catch (e: unknown) {
+      setPhase({ kind: "error", message: e instanceof Error ? e.message : String(e) });
+    }
+  }
 
   async function handleSubmit(audios: File[], script: File, lang: Lang) {
     setPhase({ kind: "warming" });
@@ -52,6 +90,7 @@ export default function Home() {
         audioFile={phase.audio}
         initialBlocks={phase.blocks}
         lang={phase.lang}
+        capcutProject={phase.capcutProject}
         onReset={() => setPhase({ kind: "home" })}
       />
     );
@@ -73,12 +112,43 @@ export default function Home() {
           <p className="text-muted text-center mb-10">
             한국어·일본어 · 1~30분 분량 지원
           </p>
-          <UploadPanel
-            onSubmit={handleSubmit}
-            disabled={phase.kind === "warming" || phase.kind === "aligning"}
-          />
 
-          {savedSession && phase.kind === "home" && (
+          {local && (
+            <div className="max-w-2xl mx-auto mb-4 flex gap-1 p-1 rounded-lg bg-panel border border-border">
+              {(
+                [
+                  ["file", "음성 파일 올리기"],
+                  ["capcut", "캡컷 프로젝트"],
+                ] as [Mode, string][]
+              ).map(([m, label]) => (
+                <button
+                  key={m}
+                  onClick={() => setMode(m)}
+                  className={`flex-1 px-4 py-2 rounded text-sm ${
+                    mode === m ? "bg-accent text-bg font-medium" : "text-muted hover:text-white"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {local && mode === "capcut" ? (
+            <CapCutPanel
+              lang={lang}
+              onLangChange={setLang}
+              onSubmit={handleCapCutSubmit}
+              disabled={phase.kind === "warming" || phase.kind === "aligning"}
+            />
+          ) : (
+            <UploadPanel
+              onSubmit={handleSubmit}
+              disabled={phase.kind === "warming" || phase.kind === "aligning"}
+            />
+          )}
+
+          {savedSession && phase.kind === "home" && mode === "file" && (
             <ResumePanel
               session={savedSession}
               onResume={(audio) =>

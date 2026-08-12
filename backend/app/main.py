@@ -4,6 +4,12 @@ Endpoints:
   POST /align     — multipart upload (audio, script, lang) → aligned blocks JSON
   GET  /health    — liveness check
   GET  /          — static frontend (when STATIC_DIR exists)
+
+Local-only (registered only when SYNCWAVE_LOCAL is set — see LOCAL_MODE):
+  GET  /capcut/projects        — CapCut drafts on this machine
+  GET  /capcut/projects/{name} — fps, duration, speech files, text tracks
+  POST /capcut/align           — align a script against a draft's timeline audio
+  POST /capcut/write           — write finished subtitles into the draft
 """
 from __future__ import annotations
 
@@ -45,6 +51,11 @@ APP_PASS = os.environ.get("APP_PASS", "")
 AUTH_ENABLED = bool(APP_PASS)
 
 MAX_AUDIO_BYTES = 50 * 1024 * 1024  # 50 MB
+
+# The CapCut routes read and write files anywhere on the host, so they must
+# never exist on the hosted deployment. Opt in explicitly; the Dockerfile that
+# builds the HuggingFace Space does not set this.
+LOCAL_MODE = os.environ.get("SYNCWAVE_LOCAL", "").lower() in {"1", "true", "yes", "on"}
 
 _jobs: dict[str, dict[str, Any]] = {}
 _executor = ThreadPoolExecutor(max_workers=2)
@@ -98,7 +109,7 @@ def require_auth(creds: HTTPBasicCredentials | None = Depends(_basic)):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {"status": "ok", "local": LOCAL_MODE}
 
 
 def _ext(name: str) -> str:
@@ -211,17 +222,128 @@ async def get_status(job_id: str):
     if job is None:
         raise HTTPException(404, "job not found")
     if job["status"] == "done":
-        return JSONResponse({
+        payload = {
             "status": "done",
             "blocks": job["blocks"],
             "audio_url": f"/audio/{job_id}",
-        })
+        }
+        if "capcut" in job:
+            payload["capcut"] = job["capcut"]
+        return JSONResponse(payload)
     if job["status"] == "error":
         raise HTTPException(500, f"alignment failed: {job['error']}")
     return JSONResponse({"status": "pending"})
 
 
 _JOB_ID_RE = re.compile(r"^[a-f0-9]{32}$")
+
+
+# ---------------------------------------------------------------------------
+# CapCut integration (local machine only)
+#
+# Aligning against the original TTS mp3 gives times on the source clock, but a
+# CapCut timeline is a re-cut of that file — silences dropped, speed changed,
+# pieces moved — so the two clocks drift apart (27s on a measured project).
+# Instead of mapping between them afterwards, /capcut/align rebuilds the audio
+# exactly as the timeline plays it and aligns against that, so the result is
+# already on the timeline clock and can be written straight back.
+
+if LOCAL_MODE:
+    from . import capcut
+
+    def _capcut_error(exc: Exception) -> HTTPException:
+        return HTTPException(400, str(exc))
+
+    @app.get("/capcut/projects", dependencies=[Depends(require_auth)])
+    async def capcut_projects():
+        try:
+            return {"root": str(capcut.draft_root()), "projects": capcut.list_projects()}
+        except capcut.CapCutError as e:
+            raise _capcut_error(e) from e
+
+    @app.get("/capcut/projects/{name}", dependencies=[Depends(require_auth)])
+    async def capcut_project(name: str):
+        try:
+            draft, _ = capcut.load_draft(name)
+            return capcut.project_info(draft)
+        except capcut.CapCutError as e:
+            raise _capcut_error(e) from e
+
+    @app.post("/capcut/align", dependencies=[Depends(require_auth)])
+    async def capcut_align(
+        project: str = Form(...),
+        script: UploadFile = File(...),
+        lang: str = Form(...),
+    ):
+        if lang not in ALLOWED_LANGS:
+            raise HTTPException(400, f"lang must be one of {ALLOWED_LANGS}")
+        if _ext(script.filename) not in ALLOWED_SCRIPT_EXT:
+            raise HTTPException(400, "script must be .txt")
+        try:
+            draft, _ = capcut.load_draft(project)
+        except capcut.CapCutError as e:
+            raise _capcut_error(e) from e
+
+        job_id = uuid.uuid4().hex
+        job_dir = TEMP_DIR / job_id
+        job_dir.mkdir()
+        # Named combined.mp3 so /audio/{job_id} serves it like any other job,
+        # letting the waveform editor play the reconstruction it aligned to.
+        audio_path = job_dir / "combined.mp3"
+        script_path = job_dir / "script.txt"
+
+        try:
+            raw = await script.read()
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                text = raw.decode("utf-8-sig", errors="replace")
+            normalized = "\n".join(l.strip() for l in text.splitlines() if l.strip())
+            if not normalized:
+                raise HTTPException(400, "script is empty after normalization")
+            script_path.write_text(normalized, encoding="utf-8")
+        except HTTPException:
+            shutil.rmtree(job_dir, ignore_errors=True)
+            raise
+        except Exception as e:
+            shutil.rmtree(job_dir, ignore_errors=True)
+            raise HTTPException(500, f"script read failed: {e}") from e
+
+        _jobs[job_id] = {"status": "pending"}
+
+        def _run():
+            try:
+                built = capcut.build_speech_audio(draft, str(audio_path))
+                blocks = align(str(audio_path), str(script_path), lang)
+                try:
+                    script_path.unlink()
+                except OSError:
+                    pass
+                _jobs[job_id] = {"status": "done", "blocks": blocks, "capcut": built}
+            except Exception as exc:
+                shutil.rmtree(job_dir, ignore_errors=True)
+                _jobs[job_id] = {"status": "error", "error": str(exc)}
+
+        _executor.submit(_run)
+        return JSONResponse({"job_id": job_id, "status": "pending"})
+
+    @app.post("/capcut/write", dependencies=[Depends(require_auth)])
+    async def capcut_write(payload: dict):
+        project = payload.get("project")
+        blocks = payload.get("blocks")
+        if not project or not isinstance(blocks, list):
+            raise HTTPException(400, "project and blocks are required")
+        try:
+            return capcut.inject_subtitles(
+                project,
+                blocks,
+                replace_track=payload.get("replace_track") or None,
+                track_name=payload.get("track_name") or "SyncWave",
+            )
+        except capcut.CapCutError as e:
+            raise _capcut_error(e) from e
+        except Exception as e:
+            raise HTTPException(500, f"자막 쓰기 실패: {e}") from e
 
 
 @app.get("/audio/{job_id}", dependencies=[Depends(require_auth)])
