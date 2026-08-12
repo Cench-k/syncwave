@@ -59,25 +59,17 @@ def _normalize(text: str) -> str:
 
 
 def _word_similarity(a: str, b: str) -> float:
-    """0~1 similarity: 1.0 if equal, prefix-overlap fraction otherwise."""
+    """Character bigram Jaccard similarity — robust for Korean/Japanese morphology."""
     if not a or not b:
         return 0.0
     if a == b:
         return 1.0
-    common = 0
-    for x, y in zip(a, b):
-        if x == y:
-            common += 1
-        else:
-            break
-    if common == 0:
-        # Try suffix overlap as a fallback for KO inflection.
-        for x, y in zip(reversed(a), reversed(b)):
-            if x == y:
-                common += 1
-            else:
-                break
-    return common / max(len(a), len(b))
+    # Single-char words: fall back to exact match only.
+    if len(a) == 1 or len(b) == 1:
+        return 1.0 if a[0] == b[0] else 0.0
+    bg_a = {a[i:i + 2] for i in range(len(a) - 1)}
+    bg_b = {b[i:i + 2] for i in range(len(b) - 1)}
+    return len(bg_a & bg_b) / len(bg_a | bg_b)
 
 
 def _needleman_wunsch(a: List[str], b: List[str]) -> List[int]:
@@ -89,7 +81,7 @@ def _needleman_wunsch(a: List[str], b: List[str]) -> List[int]:
         return [-1] * n
 
     GAP = -0.5
-    MISMATCH_THRESHOLD = 0.4  # below this, treat as mismatch (-0.5)
+    MISMATCH_THRESHOLD = 0.2  # below this, treat as mismatch (-0.5)
     score = [[0.0] * (m + 1) for _ in range(n + 1)]
     trace = [[0] * (m + 1) for _ in range(n + 1)]  # 0=diag, 1=up, 2=left
 
@@ -273,12 +265,12 @@ def align(audio_path: str, script_path: str, lang: str) -> List[dict]:
 
     blocks_with_times = _interpolate_unmatched(blocks_with_times, audio_duration)
 
-    return [
-        {
-            "index": b["index"],
-            "start": round(b["start"] or 0.0, 3),
-            "end": round(b["end"] or (b["start"] or 0.0) + 0.1, 3),
-            "text": b["text"],
-        }
-        for b in blocks_with_times
-    ]
+    MIN_DURATION = 0.5  # seconds — prevents SRT players from dropping near-zero blocks
+    result = []
+    for b in blocks_with_times:
+        start = round(b["start"] or 0.0, 3)
+        end = round(b["end"] or start + MIN_DURATION, 3)
+        if end - start < MIN_DURATION:
+            end = round(start + MIN_DURATION, 3)
+        result.append({"index": b["index"], "start": start, "end": end, "text": b["text"]})
+    return result
