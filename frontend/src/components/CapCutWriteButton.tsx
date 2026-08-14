@@ -23,6 +23,7 @@ export default function CapCutWriteButton({ project, blocks, onDone }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [blocked, setBlocked] = useState<string | null>(null);
   const [check, setCheck] = useState<string | null>(null);
+  const [confirmedClosed, setConfirmedClosed] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -36,15 +37,19 @@ export default function CapCutWriteButton({ project, blocks, onDone }: Props) {
     setBusy(true);
     setError(null);
     setBlocked(null);
+    setCheck(null);
     try {
       const r = await writeCapCutSubtitles({
         project,
         blocks,
         replace_track: replace || null,
         track_name: "SyncWave",
+        force: confirmedClosed,
       });
       setResult(r);
       onDone(`캡컷에 자막 ${r.written}개 기록됨`);
+      // CapCut can save over us seconds later, so check without being asked.
+      setTimeout(() => void verify(), 6000);
     } catch (e: unknown) {
       if (e instanceof EditorOpenError) setBlocked(e.message);
       else setError(e instanceof Error ? e.message : String(e));
@@ -151,9 +156,24 @@ export default function CapCutWriteButton({ project, blocks, onDone }: Props) {
                   <div className="mb-3 p-3 rounded bg-red-950/30 border border-red-900 text-red-200 text-xs space-y-2">
                     <p className="whitespace-pre-line">{blocked}</p>
                     <p className="text-red-300/70">
-                      캡컷을 완전히 종료한 뒤 아래 버튼을 다시 누르세요. 켜둔 채로 쓰면 캡컷이
-                      저장하면서 방금 쓴 자막을 통째로 덮어씁니다.
+                      캡컷이 이 프로젝트를 열고 있으면, 나중에 저장하면서 방금 쓴 자막을 통째로
+                      덮어씁니다. 실제로 그런 사고가 있었습니다.
                     </p>
+                    <label className="flex items-start gap-2 pt-1 cursor-pointer text-red-100">
+                      <input
+                        type="checkbox"
+                        checked={confirmedClosed}
+                        onChange={(e) => setConfirmedClosed(e.target.checked)}
+                        className="accent-accent mt-0.5"
+                      />
+                      <span>
+                        캡컷에서 <b>이 프로젝트를 닫았습니다</b> — 그대로 진행
+                        <span className="block text-red-300/60">
+                          캡컷이 켜져 있어도, 이 프로젝트만 안 열려 있으면 안전합니다.
+                          확실하지 않으면 캡컷을 완전히 종료하세요.
+                        </span>
+                      </span>
+                    </label>
                   </div>
                 ) : (
                   <div className="mb-3 p-3 rounded bg-amber-950/20 border border-amber-900/60 text-amber-200/90 text-xs">
@@ -191,10 +211,10 @@ export default function CapCutWriteButton({ project, blocks, onDone }: Props) {
                   </button>
                   <button
                     onClick={write}
-                    disabled={busy}
+                    disabled={busy || (Boolean(blocked) && !confirmedClosed)}
                     className="px-4 py-1.5 rounded bg-accent text-bg font-medium disabled:opacity-40"
                   >
-                    {busy ? "쓰는 중…" : blocked ? "다시 시도" : "쓰기"}
+                    {busy ? "쓰는 중…" : blocked ? "확인했음 · 쓰기" : "쓰기"}
                   </button>
                 </div>
               </>

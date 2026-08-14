@@ -538,20 +538,22 @@ def inject_subtitles(
 
     draft_path = project_dir(name, root) / "draft_content.json"
     warning = None
-    if not force and running_editors():
-        state = project_looks_open(draft_path)
-        if state is False:
-            # Some other project is on screen; this one is safe to touch, but
-            # say so because opening it later without restarting CapCut can
-            # still resurrect a stale in-memory copy.
-            warning = ("캡컷이 실행 중이지만 이 프로젝트는 열려 있지 않은 것으로 보입니다. "
-                       "쓰기 후 캡컷을 완전히 종료했다가 다시 열어주세요.")
-        else:
-            raise EditorOpenError(
-                "이 프로젝트가 캡컷에서 열려 있는 것 같습니다."
-                if state
-                else "캡컷이 실행 중입니다 (어느 프로젝트가 열렸는지 확인할 수 없었습니다)."
-            )
+    if running_editors() and not force:
+        # Refuse for *any* running CapCut, not just when this project looks
+        # open. Detection is one-way: a project CapCut rewrote since launch is
+        # certainly open, but one it merely holds in memory without having
+        # saved yet is indistinguishable from a closed one. Trusting that gap
+        # cost two writes on a real project — CapCut saved 45s after ours and
+        # wiped it. Only the user can confirm, so ask instead of guessing.
+        certain = project_looks_open(draft_path)
+        raise EditorOpenError(
+            "이 프로젝트가 캡컷에서 열려 있습니다. 캡컷에서 닫아주세요."
+            if certain
+            else "캡컷이 실행 중입니다. 이 프로젝트를 캡컷에서 닫았는지 확인해주세요."
+        )
+    if force and running_editors():
+        warning = ("캡컷이 실행 중인 상태로 썼습니다. 캡컷에서 이 프로젝트를 열고 있었다면 "
+                   "저장할 때 자막을 덮어씁니다 — 아래 '남아있는지 확인'으로 꼭 확인하세요.")
 
     draft, path = load_draft(name, root)
     backup = backup_draft(path)
