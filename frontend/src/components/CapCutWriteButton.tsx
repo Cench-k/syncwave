@@ -1,7 +1,12 @@
 "use client";
 import { useEffect, useState } from "react";
 import { Block, CapCutProjectInfo, CapCutWriteResult } from "@/lib/types";
-import { getCapCutProject, writeCapCutSubtitles } from "@/lib/api";
+import {
+  EditorOpenError,
+  getCapCutProject,
+  verifyCapCutTrack,
+  writeCapCutSubtitles,
+} from "@/lib/api";
 
 interface Props {
   project: string;
@@ -16,6 +21,8 @@ export default function CapCutWriteButton({ project, blocks, onDone }: Props) {
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<CapCutWriteResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [blocked, setBlocked] = useState<string | null>(null);
+  const [check, setCheck] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -28,6 +35,7 @@ export default function CapCutWriteButton({ project, blocks, onDone }: Props) {
   async function write() {
     setBusy(true);
     setError(null);
+    setBlocked(null);
     try {
       const r = await writeCapCutSubtitles({
         project,
@@ -38,9 +46,25 @@ export default function CapCutWriteButton({ project, blocks, onDone }: Props) {
       setResult(r);
       onDone(`캡컷에 자막 ${r.written}개 기록됨`);
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (e instanceof EditorOpenError) setBlocked(e.message);
+      else setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function verify() {
+    setCheck("확인 중…");
+    try {
+      const v = await verifyCapCutTrack(project);
+      setCheck(
+        v.present
+          ? `자막 ${v.segments}개가 그대로 있습니다.` +
+              (v.editor_running ? " (캡컷이 아직 실행 중입니다)" : "")
+          : "자막이 사라졌습니다 — 캡컷이 덮어썼습니다. 캡컷을 완전히 종료한 뒤 다시 쓰세요."
+      );
+    } catch (e: unknown) {
+      setCheck(e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -85,13 +109,34 @@ export default function CapCutWriteButton({ project, blocks, onDone }: Props) {
                       {result.dropped.length > 3 && " …"}
                     </div>
                   )}
+                  <div>
+                    {result.style_source === "project" && "스타일: 이 프로젝트의 기존 자막을 따랐습니다."}
+                    {result.style_source === "borrowed" && "스타일: 이 프로젝트엔 자막이 없어 최근 다른 프로젝트의 자막 스타일을 가져왔습니다."}
+                    {result.style_source === "default" && "스타일: 참고할 자막이 없어 기본 스타일로 넣었습니다."}
+                  </div>
                   <div className="text-emerald-400/70 font-mono">백업: {result.backup}</div>
                 </div>
+                {result.warning && (
+                  <div className="p-3 rounded bg-amber-950/20 border border-amber-900/60 text-amber-200/90 text-xs">
+                    {result.warning}
+                  </div>
+                )}
                 <p className="text-xs text-muted">
-                  캡컷이 켜져 있었다면 <b>완전히 종료했다가 다시 여세요.</b> 캡컷은 프로젝트를
-                  메모리에 들고 있어서, 그대로 두면 저장할 때 방금 쓴 자막을 덮어씁니다.
+                  캡컷을 열어 확인하세요. 캡컷이 켜져 있었다면 <b>완전히 종료했다가 다시</b>{" "}
+                  여세요 — 메모리에 든 예전 상태로 저장하면서 방금 쓴 자막을 덮어씁니다.
                 </p>
-                <div className="flex justify-end">
+                {check && (
+                  <p className="text-xs font-mono text-muted border border-border rounded p-2">
+                    {check}
+                  </p>
+                )}
+                <div className="flex justify-end gap-2">
+                  <button
+                    onClick={verify}
+                    className="px-4 py-1.5 rounded border border-border text-muted hover:text-white"
+                  >
+                    남아있는지 확인
+                  </button>
                   <button
                     onClick={() => setOpen(false)}
                     className="px-4 py-1.5 rounded bg-accent text-bg font-medium"
@@ -102,10 +147,20 @@ export default function CapCutWriteButton({ project, blocks, onDone }: Props) {
               </div>
             ) : (
               <>
-                <div className="mb-3 p-3 rounded bg-amber-950/20 border border-amber-900/60 text-amber-200/90 text-xs">
-                  쓰기 전에 <b>캡컷에서 이 프로젝트를 닫아주세요.</b> 켜둔 채로 쓰면 캡컷이
-                  나중에 저장하면서 덮어씁니다. 원본은 자동으로 백업됩니다.
-                </div>
+                {blocked ? (
+                  <div className="mb-3 p-3 rounded bg-red-950/30 border border-red-900 text-red-200 text-xs space-y-2">
+                    <p className="whitespace-pre-line">{blocked}</p>
+                    <p className="text-red-300/70">
+                      캡컷을 완전히 종료한 뒤 아래 버튼을 다시 누르세요. 켜둔 채로 쓰면 캡컷이
+                      저장하면서 방금 쓴 자막을 통째로 덮어씁니다.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="mb-3 p-3 rounded bg-amber-950/20 border border-amber-900/60 text-amber-200/90 text-xs">
+                    쓰기 전에 <b>캡컷에서 이 프로젝트를 닫아주세요.</b> 다른 프로젝트가 열려
+                    있는 건 괜찮습니다. 원본은 자동으로 백업됩니다.
+                  </div>
+                )}
 
                 <label className="block text-xs text-muted mb-1">쓰는 방식</label>
                 <select
@@ -139,7 +194,7 @@ export default function CapCutWriteButton({ project, blocks, onDone }: Props) {
                     disabled={busy}
                     className="px-4 py-1.5 rounded bg-accent text-bg font-medium disabled:opacity-40"
                   >
-                    {busy ? "쓰는 중…" : "쓰기"}
+                    {busy ? "쓰는 중…" : blocked ? "다시 시도" : "쓰기"}
                   </button>
                 </div>
               </>

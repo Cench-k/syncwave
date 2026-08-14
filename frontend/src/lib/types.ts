@@ -61,6 +61,11 @@ export interface CapCutWriteResult {
   overlaps_trimmed: number;
   /** Lines with no room left on the timeline, so nothing was written for them. */
   dropped: string[];
+  track_name: string;
+  /** Set when CapCut was running but this project appeared to be closed. */
+  warning: string | null;
+  /** Where the subtitle styling came from. */
+  style_source: "project" | "borrowed" | "default";
 }
 
 export interface SavedSession {

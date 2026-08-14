@@ -341,11 +341,38 @@ if LOCAL_MODE:
                 blocks,
                 replace_track=payload.get("replace_track") or None,
                 track_name=payload.get("track_name") or "SyncWave",
+                force=bool(payload.get("force")),
             )
+        except capcut.EditorOpenError as e:
+            # 409 so the client can offer "close CapCut and retry" rather than
+            # showing this as a generic failure.
+            raise HTTPException(409, str(e)) from e
         except capcut.CapCutError as e:
             raise _capcut_error(e) from e
         except Exception as e:
             raise HTTPException(500, f"자막 쓰기 실패: {e}") from e
+
+    @app.get("/capcut/verify/{name}", dependencies=[Depends(require_auth)])
+    async def capcut_verify(name: str, track: str = "SyncWave"):
+        """Is the track we wrote still there?
+
+        CapCut rewrites an open project from memory on its own schedule, which
+        silently discards our work minutes after a successful write. This lets
+        the UI check instead of the user discovering it later.
+        """
+        try:
+            draft, _ = capcut.load_draft(name)
+        except capcut.CapCutError as e:
+            raise _capcut_error(e) from e
+        found = [
+            t for t in draft.get("tracks", [])
+            if t.get("type") == "text" and t.get("name") == track
+        ]
+        return {
+            "present": bool(found),
+            "segments": sum(len(t.get("segments", [])) for t in found),
+            "editor_running": bool(capcut.running_editors()),
+        }
 
 
 @app.get("/audio/{job_id}", dependencies=[Depends(require_auth)])

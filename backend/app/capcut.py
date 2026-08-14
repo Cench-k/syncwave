@@ -55,6 +55,10 @@ class CapCutError(RuntimeError):
     pass
 
 
+class EditorOpenError(CapCutError):
+    """CapCut is running, so anything we write would be overwritten."""
+
+
 def _uid() -> str:
     return str(uuid.uuid4()).upper()
 
@@ -319,6 +323,33 @@ def _find_style_template(draft: dict) -> Optional[tuple[dict, dict]]:
     return seg_for[best_mid], texts[best_mid]
 
 
+def _borrow_style_template(
+    root: Optional[Path], skip: str, limit: int = 20
+) -> Optional[tuple[dict, dict]]:
+    """Find a subtitle style in the user's other recent projects.
+
+    A project that has never had subtitles has nothing to copy, and the
+    built-in default is a plain white box that looks nothing like the rest of
+    their work. Their previous project almost always has the font, size and
+    placement they actually use, so borrow from there.
+    """
+    try:
+        projects = list_projects(root)
+    except CapCutError:
+        return None
+    for entry in projects[:limit]:
+        if entry["name"] == skip:
+            continue
+        try:
+            other, _ = load_draft(entry["name"], root)
+        except (CapCutError, json.JSONDecodeError, OSError):
+            continue
+        found = _find_style_template(other)
+        if found:
+            return found
+    return None
+
+
 def _set_text(material: dict, text: str) -> None:
     """Replace the visible string, keeping every style attribute intact."""
     raw = material.get("content") or ""
@@ -407,6 +438,78 @@ def _default_text_segment(material_id: str, anim_id: str, start_us: int, dur_us:
     }
 
 
+CAPCUT_PROCESSES = ("CapCut.exe", "JianyingPro.exe")
+
+
+def running_editors() -> List[str]:
+    """Which CapCut processes are alive right now.
+
+    CapCut holds the whole project in memory and rewrites draft_content.json
+    on its own schedule. Writing while it is open therefore looks like it
+    worked and then silently loses everything: on one real project we wrote
+    subtitles at 10:33, CapCut opened at 10:58 and overwrote the file at
+    10:59, leaving no text track behind. A warning in the dialog was not
+    enough, so the write refuses outright.
+    """
+    if os.name != "nt":
+        return []
+    found = []
+    for name in CAPCUT_PROCESSES:
+        try:
+            proc = subprocess.run(
+                ["tasklist", "/FI", f"IMAGENAME eq {name}", "/NH"],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except OSError:
+            continue
+        if name.lower() in (proc.stdout or "").lower():
+            found.append(name)
+    return found
+
+
+def editor_started_at() -> Optional[float]:
+    """Epoch seconds of the earliest running CapCut process, if we can tell."""
+    if os.name != "nt":
+        return None
+    try:
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+             "(Get-Process CapCut,JianyingPro -ErrorAction SilentlyContinue "
+             "| Sort-Object StartTime | Select-Object -First 1)"
+             ".StartTime.ToUniversalTime().Ticks"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=15, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        ticks = int((proc.stdout or "").strip())
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+    # .NET ticks are 100ns units since year 1; epoch is 621355968000000000.
+    # ToUniversalTime() matters: StartTime is local, and treating those ticks
+    # as UTC put the process nine hours in the future here, which made every
+    # project look older than CapCut and so "not open".
+    return (ticks - 621_355_968_000_000_000) / 10_000_000
+
+
+def project_looks_open(path: Path) -> Optional[bool]:
+    """Is CapCut most likely holding *this* project open?
+
+    CapCut locks nothing and records no "current project" anywhere we can
+    read, but it does rewrite the open project's draft_content.json while it
+    runs. So a file touched after CapCut started is almost certainly the one
+    on screen, and every other project is safe to write to. Returns None when
+    the process start time is unavailable, in which case callers should treat
+    a running editor as unsafe.
+    """
+    started = editor_started_at()
+    if started is None:
+        return None
+    try:
+        return path.stat().st_mtime >= started
+    except OSError:
+        return None
+
+
 def backup_draft(path: Path) -> Path:
     stamp = time.strftime("%Y%m%d_%H%M%S")
     dest = path.with_name(f"draft_content.{stamp}.syncwave-backup.json")
@@ -421,19 +524,44 @@ def inject_subtitles(
     root: Optional[Path] = None,
     replace_track: Optional[str] = None,
     track_name: str = "SyncWave",
+    force: bool = False,
 ) -> dict:
     """Write `blocks` (seconds, timeline clock) into the project as a text track.
 
     Always backs up draft_content.json first. `replace_track` names an existing
-    text track id to overwrite instead of adding one.
+    text track id to overwrite instead of adding one. Refuses while CapCut is
+    running unless `force`, because CapCut would overwrite the result from its
+    own in-memory copy.
     """
     if not blocks:
         raise CapCutError("쓸 자막이 없습니다")
+
+    draft_path = project_dir(name, root) / "draft_content.json"
+    warning = None
+    if not force and running_editors():
+        state = project_looks_open(draft_path)
+        if state is False:
+            # Some other project is on screen; this one is safe to touch, but
+            # say so because opening it later without restarting CapCut can
+            # still resurrect a stale in-memory copy.
+            warning = ("캡컷이 실행 중이지만 이 프로젝트는 열려 있지 않은 것으로 보입니다. "
+                       "쓰기 후 캡컷을 완전히 종료했다가 다시 열어주세요.")
+        else:
+            raise EditorOpenError(
+                "이 프로젝트가 캡컷에서 열려 있는 것 같습니다."
+                if state
+                else "캡컷이 실행 중입니다 (어느 프로젝트가 열렸는지 확인할 수 없었습니다)."
+            )
+
     draft, path = load_draft(name, root)
     backup = backup_draft(path)
 
     total_us = draft.get("duration", 0)
     template = _find_style_template(draft)
+    style_source = "project"
+    if template is None:
+        template = _borrow_style_template(root, skip=name)
+        style_source = "borrowed" if template else "default"
 
     materials = draft.setdefault("materials", {})
     texts = materials.setdefault("texts", [])
@@ -532,6 +660,11 @@ def inject_subtitles(
         "clipped": clipped,
         "overlaps_trimmed": overlaps,
         "dropped": dropped,
+        "track_name": track_name,
+        "warning": warning,
+        # "project" = cloned this project's own subtitles, "borrowed" = copied
+        # from another recent project, "default" = plain built-in style.
+        "style_source": style_source,
     }
 
 

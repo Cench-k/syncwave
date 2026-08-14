@@ -117,18 +117,35 @@ export async function alignAgainstCapCut(
   }
 }
 
+/** Thrown when CapCut is running, so a write would be overwritten. */
+export class EditorOpenError extends Error {}
+
 export async function writeCapCutSubtitles(payload: {
   project: string;
   blocks: Block[];
   replace_track?: string | null;
   track_name?: string;
+  force?: boolean;
 }): Promise<CapCutWriteResult> {
   const r = await fetch(`${BASE}/capcut/write`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
+  if (r.status === 409) throw new EditorOpenError(await errText(r, "캡컷이 실행 중입니다"));
   if (!r.ok) throw new Error(await errText(r, "자막 쓰기 실패"));
+  return r.json();
+}
+
+/** Confirm the written track survived CapCut's own save cycle. */
+export async function verifyCapCutTrack(
+  project: string,
+  track = "SyncWave"
+): Promise<{ present: boolean; segments: number; editor_running: boolean }> {
+  const r = await fetch(
+    `${BASE}/capcut/verify/${encodeURIComponent(project)}?track=${encodeURIComponent(track)}`
+  );
+  if (!r.ok) throw new Error(await errText(r, "확인 실패"));
   return r.json();
 }
 
