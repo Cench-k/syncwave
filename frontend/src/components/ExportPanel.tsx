@@ -15,6 +15,8 @@ interface Props {
   onChange: (patch: Partial<ShapeOptions>) => void;
   preview: boolean;
   onPreviewChange: (v: boolean) => void;
+  /** 0 when this alignment did not come from a CapCut project. */
+  cutCount?: number;
 }
 
 const PRESET_LABELS: [keyof typeof PRESETS, string, string][] = [
@@ -44,6 +46,7 @@ export default function ExportPanel({
   onChange,
   preview,
   onPreviewChange,
+  cutCount = 0,
 }: Props) {
   const before = useMemo(
     () => shapeStats(raw, opts.minDuration),
@@ -157,6 +160,43 @@ export default function ExportPanel({
           </select>
         </Row>
       </div>
+
+      {cutCount > 0 && (
+        <div className="border border-accent/30 bg-accent/5 rounded p-2.5 space-y-1.5">
+          <label className="flex items-center gap-1.5 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={opts.snapToCuts}
+              onChange={(e) => onChange({ snapToCuts: e.target.checked })}
+              className="accent-accent"
+            />
+            <span>
+              <b>음성 조각 경계에 맞추기</b>
+              <span className="text-muted/60"> · 캡컷에서 자른 지점 {cutCount}개</span>
+            </span>
+          </label>
+          <p className="text-muted/60 text-[11px] leading-relaxed pl-5">
+            캡컷에서 대사마다 잘라두신 지점을 자막 시작으로 씁니다. Whisper 추정치보다
+            정확해서, 이어붙이기와 같이 쓰면 자막이 <b className="text-muted">조각 시작 →
+            다음 조각 시작</b>으로 딱 떨어집니다. 한 조각에 여러 줄이 들어간 구간은
+            맞출 경계가 없어 정렬 결과를 그대로 씁니다.
+          </p>
+          <label className="flex items-center gap-2 pl-5">
+            <span className="text-muted whitespace-nowrap">
+              허용 범위 <span className="text-muted/50">초 · 이보다 멀면 안 맞춤</span>
+            </span>
+            <input
+              type="number"
+              min={0}
+              step={0.05}
+              value={opts.snapWindow}
+              onChange={(e) => onChange({ snapWindow: Number(e.target.value) })}
+              disabled={!opts.snapToCuts}
+              className={inputCls + " disabled:opacity-40"}
+            />
+          </label>
+        </div>
+      )}
 
       <div className="flex flex-wrap items-center gap-4">
         <label className="flex items-center gap-1.5 text-muted cursor-pointer">

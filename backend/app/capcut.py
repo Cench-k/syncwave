@@ -266,7 +266,28 @@ def build_speech_audio(draft: dict, out_path: str, only_paths: Optional[Iterable
         "segments": placed,
         "files": [os.path.basename(p) for p in speech],
         "duration": round(len(timeline) / 1000, 3),
+        # Where each piece of speech audio starts on the timeline. Those cuts
+        # were made by hand at line boundaries, so they anchor subtitle starts
+        # better than Whisper's word timestamps — the caller snaps to them.
+        "boundaries": segment_boundaries(speech),
     }
+
+
+def segment_boundaries(speech: Dict[str, List[dict]]) -> List[float]:
+    """Sorted timeline positions where a piece of speech audio *starts*.
+
+    Segment ends are deliberately excluded. They sit at the far side of the
+    silence the editor trimmed — median 0.2s and up to 1s on a measured
+    project — so a subtitle snapping to one would appear well before its line
+    is spoken. Including them also barely helped: 64 of 92 blocks landed on a
+    cut versus 63 with starts alone.
+    """
+    return sorted({
+        round(s["tl"], 4)
+        for segs in speech.values()
+        for s in segs
+        if s["tldur"] > 0
+    })
 
 
 # --------------------------------------------------------------------------

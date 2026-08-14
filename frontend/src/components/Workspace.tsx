@@ -17,6 +17,8 @@ interface Props {
   onReset: () => void;
   /** Set when the alignment came from a CapCut project, enabling write-back. */
   capcutProject?: string | null;
+  /** Timeline positions where CapCut cut the speech audio, for edge snapping. */
+  cuts?: number[];
 }
 
 const NUDGE = 0.1;
@@ -27,6 +29,7 @@ export default function Workspace({
   lang,
   onReset,
   capcutProject = null,
+  cuts = [],
 }: Props) {
   const [blocks, setBlocks] = useState<Block[]>(initialBlocks);
   const [currentTime, setCurrentTime] = useState(0);
@@ -68,8 +71,8 @@ export default function Workspace({
   // `blocks` stays the raw alignment result so edits and re-shaping never
   // compound; shaping is a pure view/export transform on top of it.
   const shaped = useMemo(
-    () => shapeBlocks(blocks, shape, duration),
-    [blocks, shape, duration]
+    () => shapeBlocks(blocks, shape, duration, cuts),
+    [blocks, shape, duration, cuts]
   );
   const view = preview ? shaped : blocks;
 
@@ -235,6 +238,7 @@ export default function Workspace({
             onChange={patchShape}
             preview={preview}
             onPreviewChange={setPreview}
+            cutCount={cuts.length}
           />
         </section>
       )}

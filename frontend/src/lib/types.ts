@@ -19,6 +19,8 @@ export interface CapCutBuildInfo {
   segments: number;
   files: string[];
   duration: number;
+  /** Timeline positions where each piece of speech audio starts. */
+  boundaries: number[];
 }
 
 export interface CapCutProject {

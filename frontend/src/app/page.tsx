@@ -25,6 +25,7 @@ type Phase =
       blocks: Block[];
       lang: Lang;
       capcutProject?: string | null;
+      cuts?: number[];
     }
   | { kind: "error"; message: string };
 
@@ -55,6 +56,7 @@ export default function Home() {
         blocks: res.blocks,
         lang: l,
         capcutProject: project,
+        cuts: res.capcut?.boundaries ?? [],
       });
     } catch (e: unknown) {
       setPhase({ kind: "error", message: e instanceof Error ? e.message : String(e) });
@@ -91,6 +93,7 @@ export default function Home() {
         initialBlocks={phase.blocks}
         lang={phase.lang}
         capcutProject={phase.capcutProject}
+        cuts={phase.cuts}
         onReset={() => setPhase({ kind: "home" })}
       />
     );

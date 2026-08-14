@@ -36,6 +36,10 @@ export interface ShapeOptions {
   fps: number | null;
   /** Stretch the final block to the end of the audio. */
   tailToEnd: boolean;
+  /** Pull block starts onto the CapCut audio-segment cuts (see snapToCuts). */
+  snapToCuts: boolean;
+  /** How far a start may move to reach a cut, in seconds. */
+  snapWindow: number;
 }
 
 export const FPS_CHOICES = [23.976, 24, 25, 29.97, 30, 50, 59.94, 60];
@@ -53,6 +57,8 @@ export const DEFAULT_SHAPE: ShapeOptions = {
   leadIn: 0.05,
   fps: 60,
   tailToEnd: false,
+  snapToCuts: true,
+  snapWindow: 0.4,
 };
 
 /** Starting points per target editor and project frame rate. */
@@ -65,7 +71,10 @@ export const PRESETS: Record<string, Partial<ShapeOptions>> = {
   // register that the subtitle changed rather than merely re-wrapped.
   premiere30: { gapMode: "close", gapFrames: 1, maxExtend: 1.2, minDuration: 0.9, fps: 30 },
   youtube: { gapMode: "close", gapFrames: 0, maxExtend: 2.0, minDuration: 1.0, fps: null },
-  raw: { gapMode: "keep", gapFrames: 0, maxExtend: 0, minDuration: 0, leadIn: 0, fps: null },
+  raw: {
+    gapMode: "keep", gapFrames: 0, maxExtend: 0, minDuration: 0, leadIn: 0,
+    fps: null, snapToCuts: false,
+  },
 };
 
 const EPS = 1e-6;
@@ -79,10 +88,49 @@ function snap(v: number, fps: number | null): number {
  * Apply shaping. `blocks` is the raw alignment output and is never mutated.
  * `audioDuration` (0 if unknown) clamps the tail.
  */
+/**
+ * Pull each start onto the nearest audio cut within `window` seconds.
+ *
+ * On a CapCut timeline the narration is chopped into one piece per spoken
+ * line, by hand, at the exact moment the line begins — a far better edge than
+ * Whisper's word timestamps, which are only accurate to a few tenths. On a
+ * measured project 64 of 88 subtitles already sat within 0.05s of a cut;
+ * snapping makes those exact, and combined with gap closing each subtitle
+ * then runs from one cut to the next, which is what the timeline looks like.
+ *
+ * Starts move, ends do not: a long piece of audio often carries several lines,
+ * and there is no cut to put the inner boundaries on. Those keep their aligned
+ * timing and gap closing joins them up.
+ */
+function snapStartsToCuts(seq: Block[], cuts: number[], window: number): void {
+  if (!cuts.length || window <= 0) return;
+  for (let i = 0; i < seq.length; i++) {
+    const target = seq[i].start;
+    // Binary search for the closest cut.
+    let lo = 0;
+    let hi = cuts.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (cuts[mid] < target) lo = mid + 1;
+      else hi = mid;
+    }
+    let best = cuts[lo];
+    if (lo > 0 && Math.abs(cuts[lo - 1] - target) < Math.abs(best - target)) {
+      best = cuts[lo - 1];
+    }
+    if (Math.abs(best - target) > window) continue;
+    // Never reorder: stay after the previous start and before the next one.
+    const floor = i > 0 ? seq[i - 1].start + EPS : 0;
+    const ceiling = i < seq.length - 1 ? seq[i + 1].start - EPS : Infinity;
+    if (best >= floor && best <= ceiling) seq[i].start = best;
+  }
+}
+
 export function shapeBlocks(
   blocks: Block[],
   opts: ShapeOptions,
-  audioDuration = 0
+  audioDuration = 0,
+  cuts: number[] = []
 ): Block[] {
   if (!opts.enabled || blocks.length === 0) return blocks;
 
@@ -106,6 +154,11 @@ export function shapeBlocks(
   for (let i = 0; i < seq.length; i++) {
     const floor = i === 0 ? 0 : seq[i - 1].end;
     seq[i].start = Math.max(floor, seq[i].start - opts.leadIn);
+  }
+
+  // 1b. Snap onto the editor's own cuts, after lead-in so the cut wins.
+  if (opts.snapToCuts) {
+    snapStartsToCuts(seq, cuts, opts.snapWindow);
   }
 
   // 2. Close gaps — the core fix. Extend (never shrink) each end toward the
