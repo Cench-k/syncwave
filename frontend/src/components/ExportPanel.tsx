@@ -5,6 +5,7 @@ import {
   ShapeOptions,
   FPS_CHOICES,
   PRESETS,
+  countOnCuts,
   shapeStats,
 } from "@/lib/shape";
 
@@ -15,8 +16,8 @@ interface Props {
   onChange: (patch: Partial<ShapeOptions>) => void;
   preview: boolean;
   onPreviewChange: (v: boolean) => void;
-  /** 0 when this alignment did not come from a CapCut project. */
-  cutCount?: number;
+  /** Empty when this alignment did not come from a CapCut project. */
+  cuts?: number[];
 }
 
 const PRESET_LABELS: [keyof typeof PRESETS, string, string][] = [
@@ -46,8 +47,10 @@ export default function ExportPanel({
   onChange,
   preview,
   onPreviewChange,
-  cutCount = 0,
+  cuts = [],
 }: Props) {
+  const cutCount = cuts.length;
+  const snapped = useMemo(() => countOnCuts(shaped, cuts), [shaped, cuts]);
   const before = useMemo(
     () => shapeStats(raw, opts.minDuration),
     [raw, opts.minDuration]
@@ -175,6 +178,18 @@ export default function ExportPanel({
               <span className="text-muted/60"> · 캡컷에서 자른 지점 {cutCount}개</span>
             </span>
           </label>
+          <div className="pl-5 font-mono text-[11px]">
+            <span className="text-muted">컷에 맞춰진 자막 </span>
+            <span className={snapped > 0 ? "text-accent" : "text-white/80"}>
+              {snapped}/{shaped.length}
+            </span>
+            {opts.snapToCuts && snapped < shaped.length && (
+              <span className="text-muted/60">
+                {" "}
+                · 나머지 {shaped.length - snapped}개는 한 조각에 여러 줄이 들어간 구간입니다
+              </span>
+            )}
+          </div>
           <p className="text-muted/60 text-[11px] leading-relaxed pl-5">
             캡컷에서 대사마다 잘라두신 지점을 자막 시작으로 씁니다. Whisper 추정치보다
             정확해서, 이어붙이기와 같이 쓰면 자막이 <b className="text-muted">조각 시작 →

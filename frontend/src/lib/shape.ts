@@ -245,6 +245,12 @@ export interface ShapeStats {
   maxCps: number;
 }
 
+/** How many block starts sit exactly on one of the timeline's audio cuts. */
+export function countOnCuts(blocks: Block[], cuts: number[]): number {
+  if (!cuts.length) return 0;
+  return blocks.filter((b) => cuts.some((c) => Math.abs(c - b.start) < 0.002)).length;
+}
+
 /** Diagnostics shown next to the export controls, before and after shaping. */
 export function shapeStats(blocks: Block[], minDuration = 0.8): ShapeStats {
   const seq = [...blocks].sort((a, b) => a.start - b.start);

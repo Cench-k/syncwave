@@ -238,7 +238,7 @@ export default function Workspace({
             onChange={patchShape}
             preview={preview}
             onPreviewChange={setPreview}
-            cutCount={cuts.length}
+            cuts={cuts}
           />
         </section>
       )}

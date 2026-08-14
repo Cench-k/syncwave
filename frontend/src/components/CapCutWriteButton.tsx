@@ -1,12 +1,15 @@
 "use client";
 import { useEffect, useState } from "react";
-import { Block, CapCutProjectInfo, CapCutWriteResult } from "@/lib/types";
+import { Block, CapCutProjectInfo, CapCutStyle, CapCutWriteResult } from "@/lib/types";
 import {
   EditorOpenError,
   getCapCutProject,
+  listCapCutStyles,
   verifyCapCutTrack,
   writeCapCutSubtitles,
 } from "@/lib/api";
+
+const STYLE_KEY = "syncwave:styleFrom";
 
 interface Props {
   project: string;
@@ -24,6 +27,8 @@ export default function CapCutWriteButton({ project, blocks, onDone }: Props) {
   const [blocked, setBlocked] = useState<string | null>(null);
   const [check, setCheck] = useState<string | null>(null);
   const [confirmedClosed, setConfirmedClosed] = useState(false);
+  const [styles, setStyles] = useState<CapCutStyle[]>([]);
+  const [styleFrom, setStyleFrom] = useState("");
 
   useEffect(() => {
     if (!open) return;
@@ -31,6 +36,15 @@ export default function CapCutWriteButton({ project, blocks, onDone }: Props) {
     getCapCutProject(project)
       .then(setInfo)
       .catch((e) => setError(String(e.message || e)));
+    listCapCutStyles()
+      .then((s) => {
+        setStyles(s);
+        // Reuse whatever they picked last; the automatic guess is only
+        // "newest project with subtitles", which can be a different format.
+        const saved = localStorage.getItem(STYLE_KEY) || "";
+        if (saved && s.some((x) => x.project === saved)) setStyleFrom(saved);
+      })
+      .catch(() => setStyles([]));
   }, [open, project]);
 
   async function write() {
@@ -45,7 +59,9 @@ export default function CapCutWriteButton({ project, blocks, onDone }: Props) {
         replace_track: replace || null,
         track_name: "SyncWave",
         force: confirmedClosed,
+        style_from: styleFrom || null,
       });
+      if (styleFrom) localStorage.setItem(STYLE_KEY, styleFrom);
       setResult(r);
       onDone(`캡컷에 자막 ${r.written}개 기록됨`);
       // CapCut can save over us seconds later, so check without being asked.
@@ -116,8 +132,10 @@ export default function CapCutWriteButton({ project, blocks, onDone }: Props) {
                   )}
                   <div>
                     {result.style_source === "project" && "스타일: 이 프로젝트의 기존 자막을 따랐습니다."}
-                    {result.style_source === "borrowed" && "스타일: 이 프로젝트엔 자막이 없어 최근 다른 프로젝트의 자막 스타일을 가져왔습니다."}
+                    {result.style_source === "borrowed" && "스타일: 이 프로젝트엔 자막이 없어 최근 다른 프로젝트에서 가져왔습니다."}
                     {result.style_source === "default" && "스타일: 참고할 자막이 없어 기본 스타일로 넣었습니다."}
+                    {result.style_source.startsWith("project:") &&
+                      `스타일: ${result.style_source.slice(8)} 에서 복제했습니다.`}
                   </div>
                   <div className="text-emerald-400/70 font-mono">백업: {result.backup}</div>
                 </div>
@@ -196,10 +214,27 @@ export default function CapCutWriteButton({ project, blocks, onDone }: Props) {
                   ))}
                 </select>
 
-                <p className="text-xs text-muted mb-4">
-                  자막 {blocks.length}개를 씁니다. 글꼴·크기·위치는 이 프로젝트에 이미 있는
-                  자막 스타일을 그대로 따릅니다.
+                <label className="block text-xs text-muted mb-1">자막 스타일</label>
+                <select
+                  value={styleFrom}
+                  onChange={(e) => setStyleFrom(e.target.value)}
+                  className="w-full bg-bg border border-border rounded px-2 py-1.5 text-sm focus:border-accent outline-none mb-1"
+                >
+                  <option value="">
+                    자동 (이 프로젝트의 기존 자막 → 없으면 최근 프로젝트)
+                  </option>
+                  {styles.map((s) => (
+                    <option key={s.project} value={s.project}>
+                      {s.project} · {s.font || "기본"} {s.size ?? "?"} · y={s.y}
+                    </option>
+                  ))}
+                </select>
+                <p className="text-[11px] text-muted/60 mb-4">
+                  글꼴·크기·색·테두리·위치를 고른 프로젝트의 자막에서 그대로 복제합니다.
+                  자동은 포맷이 다른 프로젝트를 집을 수 있으니, 한 번 골라두면 다음에도 기억합니다.
                 </p>
+
+                <p className="text-xs text-muted mb-4">자막 {blocks.length}개를 씁니다.</p>
 
                 <div className="flex justify-end gap-2">
                   <button

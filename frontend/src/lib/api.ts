@@ -3,6 +3,7 @@ import {
   Block,
   CapCutProject,
   CapCutProjectInfo,
+  CapCutStyle,
   CapCutWriteResult,
   Lang,
 } from "./types";
@@ -120,12 +121,19 @@ export async function alignAgainstCapCut(
 /** Thrown when CapCut is running, so a write would be overwritten. */
 export class EditorOpenError extends Error {}
 
+export async function listCapCutStyles(): Promise<CapCutStyle[]> {
+  const r = await fetch(`${BASE}/capcut/styles`);
+  if (!r.ok) throw new Error(await errText(r, "스타일 목록을 읽지 못했습니다"));
+  return (await r.json()).styles;
+}
+
 export async function writeCapCutSubtitles(payload: {
   project: string;
   blocks: Block[];
   replace_track?: string | null;
   track_name?: string;
   force?: boolean;
+  style_from?: string | null;
 }): Promise<CapCutWriteResult> {
   const r = await fetch(`${BASE}/capcut/write`, {
     method: "POST",

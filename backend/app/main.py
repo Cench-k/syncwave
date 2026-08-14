@@ -329,6 +329,11 @@ if LOCAL_MODE:
         _executor.submit(_run)
         return JSONResponse({"job_id": job_id, "status": "pending"})
 
+    @app.get("/capcut/styles", dependencies=[Depends(require_auth)])
+    async def capcut_styles():
+        """Recent projects whose subtitle style can be copied."""
+        return {"styles": capcut.style_candidates()}
+
     @app.post("/capcut/write", dependencies=[Depends(require_auth)])
     async def capcut_write(payload: dict):
         project = payload.get("project")
@@ -342,6 +347,7 @@ if LOCAL_MODE:
                 replace_track=payload.get("replace_track") or None,
                 track_name=payload.get("track_name") or "SyncWave",
                 force=bool(payload.get("force")),
+                style_from=payload.get("style_from") or None,
             )
         except capcut.EditorOpenError as e:
             # 409 so the client can offer "close CapCut and retry" rather than

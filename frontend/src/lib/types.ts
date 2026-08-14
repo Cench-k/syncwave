@@ -53,6 +53,18 @@ export interface CapCutProjectInfo {
   text_tracks: CapCutTextTrack[];
 }
 
+/** A subtitle look that can be cloned, as CapCut's inspector shows it. */
+export interface CapCutStyle {
+  project: string;
+  modified: number;
+  font: string;
+  size: number | null;
+  color: string;
+  border: string;
+  x: number;
+  y: number;
+}
+
 export interface CapCutWriteResult {
   written: number;
   backup: string;
@@ -64,8 +76,8 @@ export interface CapCutWriteResult {
   track_name: string;
   /** Set when CapCut was running but this project appeared to be closed. */
   warning: string | null;
-  /** Where the subtitle styling came from. */
-  style_source: "project" | "borrowed" | "default";
+  /** "project" | "borrowed" | "default" | "project:<name>" when explicitly chosen. */
+  style_source: string;
 }
 
 export interface SavedSession {

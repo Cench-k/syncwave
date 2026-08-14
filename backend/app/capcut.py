@@ -323,6 +323,47 @@ def _find_style_template(draft: dict) -> Optional[tuple[dict, dict]]:
     return seg_for[best_mid], texts[best_mid]
 
 
+def describe_style(template: tuple[dict, dict], canvas_height: int = 1920) -> dict:
+    """Summarise a subtitle style the way CapCut shows it in its inspector."""
+    seg, mat = template
+    fonts = [f.get("title") for f in (mat.get("fonts") or []) if f.get("title")]
+    tf = (seg.get("clip") or {}).get("transform") or {}
+    # CapCut's Y readout is the normalised transform times the canvas height,
+    # not half of it: -0.44903 on a 1920-tall canvas shows as -862.
+    return {
+        "font": fonts[0] if fonts else (mat.get("font_title") or ""),
+        "size": mat.get("font_size"),
+        "color": mat.get("text_color"),
+        "border": mat.get("border_color"),
+        "x": round(float(tf.get("x", 0.0)) * canvas_height, 0),
+        "y": round(float(tf.get("y", 0.0)) * canvas_height, 0),
+    }
+
+
+def style_candidates(root: Optional[Path] = None, limit: int = 25) -> List[dict]:
+    """Recent projects whose subtitles could be used as a style template."""
+    out = []
+    try:
+        projects = list_projects(root)
+    except CapCutError:
+        return out
+    for entry in projects[:limit]:
+        try:
+            draft, _ = load_draft(entry["name"], root)
+        except (CapCutError, json.JSONDecodeError, OSError):
+            continue
+        template = _find_style_template(draft)
+        if not template:
+            continue
+        height = (draft.get("canvas_config") or {}).get("height") or 1920
+        out.append({
+            "project": entry["name"],
+            "modified": entry["modified"],
+            **describe_style(template, height),
+        })
+    return out
+
+
 def _borrow_style_template(
     root: Optional[Path], skip: str, limit: int = 20
 ) -> Optional[tuple[dict, dict]]:
@@ -525,6 +566,7 @@ def inject_subtitles(
     replace_track: Optional[str] = None,
     track_name: str = "SyncWave",
     force: bool = False,
+    style_from: Optional[str] = None,
 ) -> dict:
     """Write `blocks` (seconds, timeline clock) into the project as a text track.
 
@@ -559,11 +601,25 @@ def inject_subtitles(
     backup = backup_draft(path)
 
     total_us = draft.get("duration", 0)
-    template = _find_style_template(draft)
-    style_source = "project"
-    if template is None:
-        template = _borrow_style_template(root, skip=name)
-        style_source = "borrowed" if template else "default"
+    if style_from:
+        # Explicit choice wins: "most recent project that has subtitles" is a
+        # poor guess when the user's projects mix formats — the newest one
+        # here uses 궁서체 at 8pt for a landscape video, nothing like the
+        # 배달의민족주아체 16pt these shorts use.
+        try:
+            other, _ = load_draft(style_from, root)
+        except CapCutError as exc:
+            raise CapCutError(f"스타일을 가져올 프로젝트를 열 수 없습니다: {style_from}") from exc
+        template = _find_style_template(other)
+        if template is None:
+            raise CapCutError(f"'{style_from}' 에는 복제할 자막이 없습니다")
+        style_source = f"project:{style_from}"
+    else:
+        template = _find_style_template(draft)
+        style_source = "project"
+        if template is None:
+            template = _borrow_style_template(root, skip=name)
+            style_source = "borrowed" if template else "default"
 
     materials = draft.setdefault("materials", {})
     texts = materials.setdefault("texts", [])
