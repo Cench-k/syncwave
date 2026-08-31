@@ -6,7 +6,7 @@ import { listCapCutProjects, getCapCutProject } from "@/lib/api";
 interface Props {
   lang: Lang;
   onLangChange: (l: Lang) => void;
-  onSubmit: (project: string, script: File, lang: Lang) => void;
+  onSubmit: (project: string, script: File, lang: Lang, timeline: string | null) => void;
   disabled?: boolean;
 }
 
@@ -21,6 +21,7 @@ export default function CapCutPanel({ lang, onLangChange, onSubmit, disabled }: 
   const [root, setRoot] = useState("");
   const [selected, setSelected] = useState<string>("");
   const [info, setInfo] = useState<CapCutProjectInfo | null>(null);
+  const [timeline, setTimeline] = useState<string>("");
   const [script, setScript] = useState<File | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loadingInfo, setLoadingInfo] = useState(false);
@@ -34,6 +35,12 @@ export default function CapCutPanel({ lang, onLangChange, onSubmit, disabled }: 
       .catch((e) => setError(String(e.message || e)));
   }, []);
 
+  // Picking a project resets the timeline; picking a timeline reloads the
+  // audio/subtitle summary for that timeline specifically.
+  useEffect(() => {
+    setTimeline("");
+  }, [selected]);
+
   useEffect(() => {
     if (!selected) {
       setInfo(null);
@@ -41,11 +48,18 @@ export default function CapCutPanel({ lang, onLangChange, onSubmit, disabled }: 
     }
     setLoadingInfo(true);
     setError(null);
-    getCapCutProject(selected)
-      .then(setInfo)
+    getCapCutProject(selected, timeline || null)
+      .then((i) => {
+        setInfo(i);
+        // Default to the main timeline so the label matches what we read.
+        if (!timeline && i.timelines.length > 1) {
+          const main = i.timelines.find((t) => t.is_main) ?? i.timelines[0];
+          setTimeline(main.id);
+        }
+      })
       .catch((e) => setError(String(e.message || e)))
       .finally(() => setLoadingInfo(false));
-  }, [selected]);
+  }, [selected, timeline]);
 
   const missing = info?.speech_files.filter((f) => !f.exists) ?? [];
   const ready = Boolean(selected && script && info && info.speech_files.length > 0 && !missing.length);
@@ -93,6 +107,31 @@ export default function CapCutPanel({ lang, onLangChange, onSubmit, disabled }: 
             <p className="text-[11px] text-muted/50 mb-4 truncate" title={root}>
               {root}
             </p>
+          </>
+        )}
+
+        {info && info.timelines.length > 1 && (
+          <>
+            <label className="block text-xs text-muted mb-1">
+              타임라인{" "}
+              <span className="text-muted/50">
+                이 프로젝트에 {info.timelines.length}개 있습니다
+              </span>
+            </label>
+            <select
+              value={timeline}
+              onChange={(e) => setTimeline(e.target.value)}
+              disabled={disabled}
+              className="w-full bg-bg border border-border rounded px-2 py-2 text-sm focus:border-accent outline-none mb-4"
+            >
+              {info.timelines.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.name}
+                  {t.is_main ? " (메인)" : ""} · {t.duration.toFixed(1)}초 · 음성{" "}
+                  {t.audio_segments}조각 · 자막 {t.text_segments}개
+                </option>
+              ))}
+            </select>
           </>
         )}
 
@@ -167,7 +206,7 @@ export default function CapCutPanel({ lang, onLangChange, onSubmit, disabled }: 
           </div>
           <button
             disabled={!ready || disabled}
-            onClick={() => script && onSubmit(selected, script, lang)}
+            onClick={() => script && onSubmit(selected, script, lang, timeline || null)}
             className="px-6 py-2 rounded-lg bg-accent text-bg font-semibold disabled:opacity-30 disabled:cursor-not-allowed"
           >
             정렬 시작

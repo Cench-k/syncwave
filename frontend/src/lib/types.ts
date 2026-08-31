@@ -45,12 +45,25 @@ export interface CapCutTextTrack {
   segments: number;
 }
 
+/** One of the timelines a CapCut project can hold. */
+export interface CapCutTimeline {
+  id: string;
+  name: string;
+  is_main: boolean;
+  exists: boolean;
+  duration: number;
+  text_segments: number;
+  audio_segments: number;
+}
+
 export interface CapCutProjectInfo {
   fps: number | null;
   duration: number;
   canvas: { width?: number; height?: number; ratio?: string };
   speech_files: CapCutSpeechFile[];
   text_tracks: CapCutTextTrack[];
+  timelines: CapCutTimeline[];
+  timeline: string | null;
 }
 
 /** A subtitle look that can be cloned, as CapCut's inspector shows it. */
@@ -74,6 +87,8 @@ export interface CapCutWriteResult {
   /** Lines with no room left on the timeline, so nothing was written for them. */
   dropped: string[];
   track_name: string;
+  timeline: string | null;
+  files: string[];
   /** Set when CapCut was running but this project appeared to be closed. */
   warning: string | null;
   /** "project" | "borrowed" | "default" | "project:<name>" when explicitly chosen. */

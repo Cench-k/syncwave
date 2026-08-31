@@ -25,6 +25,7 @@ type Phase =
       blocks: Block[];
       lang: Lang;
       capcutProject?: string | null;
+      capcutTimeline?: string | null;
       cuts?: number[];
     }
   | { kind: "error"; message: string };
@@ -45,10 +46,15 @@ export default function Home() {
     isLocalBackend().then(setLocal);
   }, []);
 
-  async function handleCapCutSubmit(project: string, script: File, l: Lang) {
+  async function handleCapCutSubmit(
+    project: string,
+    script: File,
+    l: Lang,
+    timeline: string | null
+  ) {
     setPhase({ kind: "aligning" });
     try {
-      const res = await alignAgainstCapCut(project, script, l);
+      const res = await alignAgainstCapCut(project, script, l, timeline);
       const audio = await fetchCombinedAudio(res.audio_url, `${project}.mp3`);
       setPhase({
         kind: "workspace",
@@ -56,6 +62,7 @@ export default function Home() {
         blocks: res.blocks,
         lang: l,
         capcutProject: project,
+        capcutTimeline: timeline,
         cuts: res.capcut?.boundaries ?? [],
       });
     } catch (e: unknown) {
@@ -93,6 +100,7 @@ export default function Home() {
         initialBlocks={phase.blocks}
         lang={phase.lang}
         capcutProject={phase.capcutProject}
+        capcutTimeline={phase.capcutTimeline}
         cuts={phase.cuts}
         onReset={() => setPhase({ kind: "home" })}
       />

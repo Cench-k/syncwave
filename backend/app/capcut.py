@@ -31,6 +31,7 @@ import copy
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -101,8 +102,91 @@ def project_dir(name: str, root: Optional[Path] = None) -> Path:
     return target
 
 
-def load_draft(name: str, root: Optional[Path] = None) -> tuple[dict, Path]:
-    path = project_dir(name, root) / "draft_content.json"
+_TIMELINE_ID_RE = re.compile(r"^[A-Fa-f0-9-]{16,64}$")
+
+
+def list_timelines(name: str, root: Optional[Path] = None) -> List[dict]:
+    """The project's timelines, as CapCut's own tab bar shows them.
+
+    One CapCut project can hold several timelines. Each keeps its own content
+    at Timelines/<id>/draft_content.json, and the project's root
+    draft_content.json is a byte-identical copy of whichever one is main — so
+    reading only the root, as this module used to, silently pinned every
+    operation to the main timeline.
+
+    Timelines/project.json is the authority on which timelines exist; the
+    folder listing is not, because deleting a timeline leaves its folder
+    behind.
+    """
+    base = project_dir(name, root)
+    index = base / "Timelines" / "project.json"
+    if not index.is_file():
+        return []
+    try:
+        with index.open(encoding="utf-8") as f:
+            meta = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return []
+
+    main_id = meta.get("main_timeline_id")
+    out = []
+    for entry in meta.get("timelines", []):
+        tid = entry.get("id")
+        if not tid or entry.get("is_marked_delete"):
+            continue
+        content = base / "Timelines" / tid / "draft_content.json"
+        row = {
+            "id": tid,
+            "name": entry.get("name") or tid[:8],
+            "is_main": tid == main_id,
+            "exists": content.is_file(),
+            "duration": 0.0,
+            "text_segments": 0,
+            "audio_segments": 0,
+        }
+        if row["exists"]:
+            try:
+                with content.open(encoding="utf-8") as f:
+                    d = json.load(f)
+                row["duration"] = round(d.get("duration", 0) / US, 3)
+                for t in d.get("tracks", []):
+                    n = len(t.get("segments", []))
+                    if t.get("type") == "text":
+                        row["text_segments"] += n
+                    elif t.get("type") == "audio":
+                        row["audio_segments"] += n
+            except (json.JSONDecodeError, OSError):
+                pass
+        out.append(row)
+    # Main first, then CapCut's own order.
+    out.sort(key=lambda r: (not r["is_main"],))
+    return out
+
+
+def draft_paths(name: str, root: Optional[Path] = None,
+                timeline: Optional[str] = None) -> List[Path]:
+    """Every file that must be updated for `timeline`, primary path first.
+
+    Writing the main timeline means writing both its own file and the root
+    copy CapCut keeps in sync with it; leaving one stale would let CapCut pick
+    whichever it loads first and lose the subtitles.
+    """
+    base = project_dir(name, root)
+    root_path = base / "draft_content.json"
+    if not timeline:
+        return [root_path]
+    if not _TIMELINE_ID_RE.match(timeline):
+        raise CapCutError("잘못된 타임라인 ID 입니다")
+    own = base / "Timelines" / timeline / "draft_content.json"
+    if not own.is_file():
+        raise CapCutError(f"타임라인을 찾을 수 없습니다: {timeline}")
+    is_main = any(t["id"] == timeline and t["is_main"] for t in list_timelines(name, root))
+    return [own, root_path] if is_main else [own]
+
+
+def load_draft(name: str, root: Optional[Path] = None,
+               timeline: Optional[str] = None) -> tuple[dict, Path]:
+    path = draft_paths(name, root, timeline)[0]
     with path.open(encoding="utf-8") as f:
         return json.load(f), path
 
@@ -364,6 +448,23 @@ def style_candidates(root: Optional[Path] = None, limit: int = 25) -> List[dict]
     return out
 
 
+def _sibling_timeline_template(
+    name: str, root: Optional[Path], timeline: Optional[str]
+) -> Optional[tuple[dict, dict]]:
+    """A subtitle style from another timeline of the same project."""
+    for other in list_timelines(name, root):
+        if not other["exists"] or other["id"] == timeline or not other["text_segments"]:
+            continue
+        try:
+            draft, _ = load_draft(name, root, other["id"])
+        except (CapCutError, json.JSONDecodeError, OSError):
+            continue
+        found = _find_style_template(draft)
+        if found:
+            return found
+    return None
+
+
 def _borrow_style_template(
     root: Optional[Path], skip: str, limit: int = 20
 ) -> Optional[tuple[dict, dict]]:
@@ -567,6 +668,7 @@ def inject_subtitles(
     track_name: str = "SyncWave",
     force: bool = False,
     style_from: Optional[str] = None,
+    timeline: Optional[str] = None,
 ) -> dict:
     """Write `blocks` (seconds, timeline clock) into the project as a text track.
 
@@ -578,7 +680,8 @@ def inject_subtitles(
     if not blocks:
         raise CapCutError("쓸 자막이 없습니다")
 
-    draft_path = project_dir(name, root) / "draft_content.json"
+    targets = draft_paths(name, root, timeline)
+    draft_path = targets[0]
     warning = None
     if running_editors() and not force:
         # Refuse for *any* running CapCut, not just when this project looks
@@ -597,7 +700,7 @@ def inject_subtitles(
         warning = ("캡컷이 실행 중인 상태로 썼습니다. 캡컷에서 이 프로젝트를 열고 있었다면 "
                    "저장할 때 자막을 덮어씁니다 — 아래 '남아있는지 확인'으로 꼭 확인하세요.")
 
-    draft, path = load_draft(name, root)
+    draft, path = load_draft(name, root, timeline)
     backup = backup_draft(path)
 
     total_us = draft.get("duration", 0)
@@ -617,6 +720,11 @@ def inject_subtitles(
     else:
         template = _find_style_template(draft)
         style_source = "project"
+        if template is None:
+            # A project's other timelines are the closest match there is —
+            # same show, same format — so try those before other projects.
+            template = _sibling_timeline_template(name, root, timeline)
+            style_source = "sibling" if template else style_source
         if template is None:
             template = _borrow_style_template(root, skip=name)
             style_source = "borrowed" if template else "default"
@@ -710,7 +818,8 @@ def inject_subtitles(
     texts.extend(new_texts)
     animations.extend(new_anims)
 
-    _atomic_write(path, draft)
+    for target in targets:
+        _atomic_write(target, draft)
     return {
         "written": len(segments),
         "backup": backup.name,
@@ -719,6 +828,8 @@ def inject_subtitles(
         "overlaps_trimmed": overlaps,
         "dropped": dropped,
         "track_name": track_name,
+        "timeline": timeline,
+        "files": [str(t.name) for t in targets],
         "warning": warning,
         # "project" = cloned this project's own subtitles, "borrowed" = copied
         # from another recent project, "default" = plain built-in style.

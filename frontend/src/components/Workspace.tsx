@@ -17,6 +17,8 @@ interface Props {
   onReset: () => void;
   /** Set when the alignment came from a CapCut project, enabling write-back. */
   capcutProject?: string | null;
+  /** Which of the project's timelines the alignment came from. */
+  capcutTimeline?: string | null;
   /** Timeline positions where CapCut cut the speech audio, for edge snapping. */
   cuts?: number[];
 }
@@ -29,6 +31,7 @@ export default function Workspace({
   lang,
   onReset,
   capcutProject = null,
+  capcutTimeline = null,
   cuts = [],
 }: Props) {
   const [blocks, setBlocks] = useState<Block[]>(initialBlocks);
@@ -206,6 +209,7 @@ export default function Workspace({
           {capcutProject && (
             <CapCutWriteButton
               project={capcutProject}
+              timeline={capcutTimeline}
               blocks={shaped}
               onDone={(m) => toast.show(`✅ ${m}`)}
             />

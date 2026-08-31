@@ -90,8 +90,12 @@ export async function listCapCutProjects(): Promise<{
   return r.json();
 }
 
-export async function getCapCutProject(name: string): Promise<CapCutProjectInfo> {
-  const r = await fetch(`${BASE}/capcut/projects/${encodeURIComponent(name)}`);
+export async function getCapCutProject(
+  name: string,
+  timeline?: string | null
+): Promise<CapCutProjectInfo> {
+  const q = timeline ? `?timeline=${encodeURIComponent(timeline)}` : "";
+  const r = await fetch(`${BASE}/capcut/projects/${encodeURIComponent(name)}${q}`);
   if (!r.ok) throw new Error(await errText(r, "프로젝트 정보를 읽지 못했습니다"));
   return r.json();
 }
@@ -99,12 +103,14 @@ export async function getCapCutProject(name: string): Promise<CapCutProjectInfo>
 export async function alignAgainstCapCut(
   project: string,
   script: File,
-  lang: Lang
+  lang: Lang,
+  timeline?: string | null
 ): Promise<AlignResponse> {
   const fd = new FormData();
   fd.append("project", project);
   fd.append("script", script);
   fd.append("lang", lang);
+  if (timeline) fd.append("timeline", timeline);
   const res = await fetch(`${BASE}/capcut/align`, { method: "POST", body: fd });
   if (!res.ok) throw new Error(await errText(res, "정렬 요청 실패"));
   const { job_id } = await res.json();
@@ -134,6 +140,7 @@ export async function writeCapCutSubtitles(payload: {
   track_name?: string;
   force?: boolean;
   style_from?: string | null;
+  timeline?: string | null;
 }): Promise<CapCutWriteResult> {
   const r = await fetch(`${BASE}/capcut/write`, {
     method: "POST",
@@ -148,10 +155,12 @@ export async function writeCapCutSubtitles(payload: {
 /** Confirm the written track survived CapCut's own save cycle. */
 export async function verifyCapCutTrack(
   project: string,
-  track = "SyncWave"
+  track = "SyncWave",
+  timeline?: string | null
 ): Promise<{ present: boolean; segments: number; editor_running: boolean }> {
+  const tl = timeline ? `&timeline=${encodeURIComponent(timeline)}` : "";
   const r = await fetch(
-    `${BASE}/capcut/verify/${encodeURIComponent(project)}?track=${encodeURIComponent(track)}`
+    `${BASE}/capcut/verify/${encodeURIComponent(project)}?track=${encodeURIComponent(track)}${tl}`
   );
   if (!r.ok) throw new Error(await errText(r, "확인 실패"));
   return r.json();

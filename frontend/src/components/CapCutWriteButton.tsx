@@ -13,11 +13,12 @@ const STYLE_KEY = "syncwave:styleFrom";
 
 interface Props {
   project: string;
+  timeline?: string | null;
   blocks: Block[];
   onDone: (msg: string) => void;
 }
 
-export default function CapCutWriteButton({ project, blocks, onDone }: Props) {
+export default function CapCutWriteButton({ project, timeline = null, blocks, onDone }: Props) {
   const [open, setOpen] = useState(false);
   const [info, setInfo] = useState<CapCutProjectInfo | null>(null);
   const [replace, setReplace] = useState("");
@@ -33,7 +34,7 @@ export default function CapCutWriteButton({ project, blocks, onDone }: Props) {
   useEffect(() => {
     if (!open) return;
     setError(null);
-    getCapCutProject(project)
+    getCapCutProject(project, timeline)
       .then(setInfo)
       .catch((e) => setError(String(e.message || e)));
     listCapCutStyles()
@@ -45,7 +46,7 @@ export default function CapCutWriteButton({ project, blocks, onDone }: Props) {
         if (saved && s.some((x) => x.project === saved)) setStyleFrom(saved);
       })
       .catch(() => setStyles([]));
-  }, [open, project]);
+  }, [open, project, timeline]);
 
   async function write() {
     setBusy(true);
@@ -60,6 +61,7 @@ export default function CapCutWriteButton({ project, blocks, onDone }: Props) {
         track_name: "SyncWave",
         force: confirmedClosed,
         style_from: styleFrom || null,
+        timeline,
       });
       if (styleFrom) localStorage.setItem(STYLE_KEY, styleFrom);
       setResult(r);
@@ -77,7 +79,7 @@ export default function CapCutWriteButton({ project, blocks, onDone }: Props) {
   async function verify() {
     setCheck("확인 중…");
     try {
-      const v = await verifyCapCutTrack(project);
+      const v = await verifyCapCutTrack(project, "SyncWave", timeline);
       setCheck(
         v.present
           ? `자막 ${v.segments}개가 그대로 있습니다.` +
@@ -105,7 +107,15 @@ export default function CapCutWriteButton({ project, blocks, onDone }: Props) {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
           <div className="w-full max-w-lg rounded-xl border border-border bg-panel p-5 text-sm">
             <h3 className="font-semibold mb-1">캡컷 프로젝트에 자막 쓰기</h3>
-            <p className="text-xs text-muted mb-4 font-mono">{project}</p>
+            <p className="text-xs text-muted mb-4 font-mono">
+              {project}
+              {info && info.timelines.length > 1 && (
+                <span className="text-muted/60">
+                  {" · "}
+                  {info.timelines.find((t) => t.id === timeline)?.name ?? "메인 타임라인"}
+                </span>
+              )}
+            </p>
 
             {error && (
               <div className="mb-3 p-3 rounded bg-red-950/30 border border-red-900 text-red-300 text-xs">
@@ -132,6 +142,7 @@ export default function CapCutWriteButton({ project, blocks, onDone }: Props) {
                   )}
                   <div>
                     {result.style_source === "project" && "스타일: 이 프로젝트의 기존 자막을 따랐습니다."}
+                    {result.style_source === "sibling" && "스타일: 같은 프로젝트의 다른 타임라인 자막에서 가져왔습니다."}
                     {result.style_source === "borrowed" && "스타일: 이 프로젝트엔 자막이 없어 최근 다른 프로젝트에서 가져왔습니다."}
                     {result.style_source === "default" && "스타일: 참고할 자막이 없어 기본 스타일로 넣었습니다."}
                     {result.style_source.startsWith("project:") &&

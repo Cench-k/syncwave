@@ -264,10 +264,15 @@ if LOCAL_MODE:
             raise _capcut_error(e) from e
 
     @app.get("/capcut/projects/{name}", dependencies=[Depends(require_auth)])
-    async def capcut_project(name: str):
+    async def capcut_project(name: str, timeline: str | None = None):
         try:
-            draft, _ = capcut.load_draft(name)
-            return capcut.project_info(draft)
+            draft, _ = capcut.load_draft(name, timeline=timeline)
+            info = capcut.project_info(draft)
+            # A project can hold several timelines; without this the UI can
+            # only ever see the main one.
+            info["timelines"] = capcut.list_timelines(name)
+            info["timeline"] = timeline
+            return info
         except capcut.CapCutError as e:
             raise _capcut_error(e) from e
 
@@ -276,13 +281,14 @@ if LOCAL_MODE:
         project: str = Form(...),
         script: UploadFile = File(...),
         lang: str = Form(...),
+        timeline: str = Form(""),
     ):
         if lang not in ALLOWED_LANGS:
             raise HTTPException(400, f"lang must be one of {ALLOWED_LANGS}")
         if _ext(script.filename) not in ALLOWED_SCRIPT_EXT:
             raise HTTPException(400, "script must be .txt")
         try:
-            draft, _ = capcut.load_draft(project)
+            draft, _ = capcut.load_draft(project, timeline=timeline or None)
         except capcut.CapCutError as e:
             raise _capcut_error(e) from e
 
@@ -348,6 +354,7 @@ if LOCAL_MODE:
                 track_name=payload.get("track_name") or "SyncWave",
                 force=bool(payload.get("force")),
                 style_from=payload.get("style_from") or None,
+                timeline=payload.get("timeline") or None,
             )
         except capcut.EditorOpenError as e:
             # 409 so the client can offer "close CapCut and retry" rather than
@@ -359,7 +366,7 @@ if LOCAL_MODE:
             raise HTTPException(500, f"자막 쓰기 실패: {e}") from e
 
     @app.get("/capcut/verify/{name}", dependencies=[Depends(require_auth)])
-    async def capcut_verify(name: str, track: str = "SyncWave"):
+    async def capcut_verify(name: str, track: str = "SyncWave", timeline: str | None = None):
         """Is the track we wrote still there?
 
         CapCut rewrites an open project from memory on its own schedule, which
@@ -367,7 +374,7 @@ if LOCAL_MODE:
         the UI check instead of the user discovering it later.
         """
         try:
-            draft, _ = capcut.load_draft(name)
+            draft, _ = capcut.load_draft(name, timeline=timeline)
         except capcut.CapCutError as e:
             raise _capcut_error(e) from e
         found = [
