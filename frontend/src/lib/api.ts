@@ -92,9 +92,13 @@ export async function listCapCutProjects(): Promise<{
 
 export async function getCapCutProject(
   name: string,
-  timeline?: string | null
+  timeline?: string | null,
+  audioTrack?: number | null
 ): Promise<CapCutProjectInfo> {
-  const q = timeline ? `?timeline=${encodeURIComponent(timeline)}` : "";
+  const params = new URLSearchParams();
+  if (timeline) params.set("timeline", timeline);
+  if (audioTrack != null && audioTrack >= 0) params.set("audio_track", String(audioTrack));
+  const q = params.toString() ? `?${params}` : "";
   const r = await fetch(`${BASE}/capcut/projects/${encodeURIComponent(name)}${q}`);
   if (!r.ok) throw new Error(await errText(r, "프로젝트 정보를 읽지 못했습니다"));
   return r.json();
@@ -104,13 +108,15 @@ export async function alignAgainstCapCut(
   project: string,
   script: File,
   lang: Lang,
-  timeline?: string | null
+  timeline?: string | null,
+  audioTrack?: number | null
 ): Promise<AlignResponse> {
   const fd = new FormData();
   fd.append("project", project);
   fd.append("script", script);
   fd.append("lang", lang);
   if (timeline) fd.append("timeline", timeline);
+  if (audioTrack != null && audioTrack >= 0) fd.append("audio_track", String(audioTrack));
   const res = await fetch(`${BASE}/capcut/align`, { method: "POST", body: fd });
   if (!res.ok) throw new Error(await errText(res, "정렬 요청 실패"));
   const { job_id } = await res.json();

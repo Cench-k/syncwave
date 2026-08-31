@@ -56,6 +56,17 @@ export interface CapCutTimeline {
   audio_segments: number;
 }
 
+/** An audio track as CapCut stacks it under the video. */
+export interface CapCutAudioTrack {
+  index: number;
+  /** 0 = directly under the video, which is where narration lives. */
+  position: number;
+  segments: number;
+  speech_segments: number;
+  coverage: number;
+  files: string[];
+}
+
 export interface CapCutProjectInfo {
   fps: number | null;
   duration: number;
@@ -64,6 +75,8 @@ export interface CapCutProjectInfo {
   text_tracks: CapCutTextTrack[];
   timelines: CapCutTimeline[];
   timeline: string | null;
+  audio_tracks: CapCutAudioTrack[];
+  audio_track: number | null;
 }
 
 /** A subtitle look that can be cloned, as CapCut's inspector shows it. */

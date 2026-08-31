@@ -191,13 +191,68 @@ def load_draft(name: str, root: Optional[Path] = None,
         return json.load(f), path
 
 
-def speech_segments(draft: dict, types: Iterable[str] = SPEECH_TYPES) -> Dict[str, List[dict]]:
-    """Spoken-audio segments grouped by source file path, timeline-ordered."""
+def audio_tracks(draft: dict, types: Iterable[str] = SPEECH_TYPES) -> List[dict]:
+    """Audio tracks in timeline order, with what each one carries.
+
+    CapCut stacks audio below the video, nearest first, and `tracks` keeps
+    that order — so the first audio track is the one sitting directly under
+    the video, which is where the narration lives. The ones below it are BGM
+    and sound effects.
+    """
     types = set(types)
     mats = {m["id"]: m for m in draft.get("materials", {}).get("audios", [])}
-    by_path: Dict[str, List[dict]] = defaultdict(list)
-    for track in draft.get("tracks", []):
+    out = []
+    for i, track in enumerate(draft.get("tracks", [])):
         if track.get("type") != "audio":
+            continue
+        segs = track.get("segments", [])
+        speech, files, covered = 0, {}, 0.0
+        for seg in segs:
+            mat = mats.get(seg.get("material_id"))
+            if not mat:
+                continue
+            dur = seg.get("target_timerange", {}).get("duration", 0) / US
+            covered += dur
+            if mat.get("type") in types:
+                speech += 1
+                base = os.path.basename((mat.get("path") or "").replace("\\", "/"))
+                files[base] = files.get(base, 0.0) + dur
+        out.append({
+            "index": i,
+            "position": len(out),          # 0 = directly under the video
+            "segments": len(segs),
+            "speech_segments": speech,
+            "coverage": round(covered, 3),
+            "files": [f for f, _ in sorted(files.items(), key=lambda kv: -kv[1])],
+        })
+    return out
+
+
+def default_audio_track(draft: dict, types: Iterable[str] = SPEECH_TYPES) -> Optional[int]:
+    """Index of the narration track: the topmost audio track that has speech."""
+    for t in audio_tracks(draft, types):
+        if t["speech_segments"]:
+            return t["index"]
+    return None
+
+
+def speech_segments(draft: dict, types: Iterable[str] = SPEECH_TYPES,
+                    track_index: Optional[int] = None) -> Dict[str, List[dict]]:
+    """Spoken-audio segments grouped by source file path, timeline-ordered.
+
+    Restricted to a single audio track. Sweeping every track pulled sound
+    effects and stray voice clips into the reconstruction — on one project a
+    0.4s snippet of the original Chinese vocals, sitting on an effects track,
+    ended up in the audio Whisper transcribed. Defaults to the track directly
+    under the video, which is where the narration is.
+    """
+    types = set(types)
+    if track_index is None:
+        track_index = default_audio_track(draft, types)
+    mats = {m["id"]: m for m in draft.get("materials", {}).get("audios", [])}
+    by_path: Dict[str, List[dict]] = defaultdict(list)
+    for i, track in enumerate(draft.get("tracks", [])):
+        if track.get("type") != "audio" or i != track_index:
             continue
         for seg in track.get("segments", []):
             mat = mats.get(seg.get("material_id"))
@@ -221,8 +276,10 @@ def speech_segments(draft: dict, types: Iterable[str] = SPEECH_TYPES) -> Dict[st
     return dict(by_path)
 
 
-def project_info(draft: dict) -> dict:
-    speech = speech_segments(draft)
+def project_info(draft: dict, track_index: Optional[int] = None) -> dict:
+    if track_index is None:
+        track_index = default_audio_track(draft)
+    speech = speech_segments(draft, track_index=track_index)
     files = []
     for path, segs in sorted(speech.items(), key=lambda kv: -sum(s["tldur"] for s in kv[1])):
         files.append({
@@ -248,6 +305,8 @@ def project_info(draft: dict) -> dict:
         "canvas": draft.get("canvas_config") or {},
         "speech_files": files,
         "text_tracks": text_tracks,
+        "audio_tracks": audio_tracks(draft),
+        "audio_track": track_index,
     }
 
 
@@ -271,7 +330,8 @@ def _atempo_chain(speed: float) -> List[float]:
 SILENCE_FLOOR_DB = -80.0
 
 
-def build_speech_audio(draft: dict, out_path: str, only_paths: Optional[Iterable[str]] = None) -> dict:
+def build_speech_audio(draft: dict, out_path: str, only_paths: Optional[Iterable[str]] = None,
+                       track_index: Optional[int] = None) -> dict:
     """Render the spoken track exactly as the timeline plays it.
 
     Each segment is cut from its source file, re-timed for the segment's speed
@@ -285,7 +345,7 @@ def build_speech_audio(draft: dict, out_path: str, only_paths: Optional[Iterable
     "aligned" into evenly spaced nonsense. One short call per segment costs a
     few seconds next to Whisper and cannot fail that way.
     """
-    speech = speech_segments(draft)
+    speech = speech_segments(draft, track_index=track_index)
     if only_paths is not None:
         wanted = set(only_paths)
         speech = {p: s for p, s in speech.items() if p in wanted}
@@ -354,6 +414,7 @@ def build_speech_audio(draft: dict, out_path: str, only_paths: Optional[Iterable
         "segments": placed,
         "files": [os.path.basename(p) for p in speech],
         "duration": round(len(timeline) / 1000, 3),
+        "audio_track": track_index if track_index is not None else default_audio_track(draft),
         # Where each piece of speech audio starts on the timeline. Those cuts
         # were made by hand at line boundaries, so they anchor subtitle starts
         # better than Whisper's word timestamps — the caller snaps to them.

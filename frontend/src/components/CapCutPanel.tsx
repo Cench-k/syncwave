@@ -6,7 +6,13 @@ import { listCapCutProjects, getCapCutProject } from "@/lib/api";
 interface Props {
   lang: Lang;
   onLangChange: (l: Lang) => void;
-  onSubmit: (project: string, script: File, lang: Lang, timeline: string | null) => void;
+  onSubmit: (
+    project: string,
+    script: File,
+    lang: Lang,
+    timeline: string | null,
+    audioTrack: number | null
+  ) => void;
   disabled?: boolean;
 }
 
@@ -22,6 +28,7 @@ export default function CapCutPanel({ lang, onLangChange, onSubmit, disabled }: 
   const [selected, setSelected] = useState<string>("");
   const [info, setInfo] = useState<CapCutProjectInfo | null>(null);
   const [timeline, setTimeline] = useState<string>("");
+  const [audioTrack, setAudioTrack] = useState<number | null>(null);
   const [script, setScript] = useState<File | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loadingInfo, setLoadingInfo] = useState(false);
@@ -39,6 +46,7 @@ export default function CapCutPanel({ lang, onLangChange, onSubmit, disabled }: 
   // audio/subtitle summary for that timeline specifically.
   useEffect(() => {
     setTimeline("");
+    setAudioTrack(null);
   }, [selected]);
 
   useEffect(() => {
@@ -48,9 +56,10 @@ export default function CapCutPanel({ lang, onLangChange, onSubmit, disabled }: 
     }
     setLoadingInfo(true);
     setError(null);
-    getCapCutProject(selected, timeline || null)
+    getCapCutProject(selected, timeline || null, audioTrack)
       .then((i) => {
         setInfo(i);
+        if (audioTrack === null && i.audio_track !== null) setAudioTrack(i.audio_track);
         // Default to the main timeline so the label matches what we read.
         if (!timeline && i.timelines.length > 1) {
           const main = i.timelines.find((t) => t.is_main) ?? i.timelines[0];
@@ -59,7 +68,7 @@ export default function CapCutPanel({ lang, onLangChange, onSubmit, disabled }: 
       })
       .catch((e) => setError(String(e.message || e)))
       .finally(() => setLoadingInfo(false));
-  }, [selected, timeline]);
+  }, [selected, timeline, audioTrack]);
 
   const missing = info?.speech_files.filter((f) => !f.exists) ?? [];
   const ready = Boolean(selected && script && info && info.speech_files.length > 0 && !missing.length);
@@ -129,6 +138,31 @@ export default function CapCutPanel({ lang, onLangChange, onSubmit, disabled }: 
                   {t.name}
                   {t.is_main ? " (메인)" : ""} · {t.duration.toFixed(1)}초 · 음성{" "}
                   {t.audio_segments}조각 · 자막 {t.text_segments}개
+                </option>
+              ))}
+            </select>
+          </>
+        )}
+
+        {info && info.audio_tracks.length > 1 && (
+          <>
+            <label className="block text-xs text-muted mb-1">
+              음향 트랙{" "}
+              <span className="text-muted/50">
+                영상 바로 아래 트랙이 내레이션입니다 · 아래쪽은 BGM·효과음
+              </span>
+            </label>
+            <select
+              value={audioTrack ?? ""}
+              onChange={(e) => setAudioTrack(Number(e.target.value))}
+              disabled={disabled}
+              className="w-full bg-bg border border-border rounded px-2 py-2 text-sm focus:border-accent outline-none mb-4"
+            >
+              {info.audio_tracks.map((t) => (
+                <option key={t.index} value={t.index}>
+                  {t.position === 0 ? "영상 바로 아래" : `아래에서 ${t.position + 1}번째`} ·{" "}
+                  {t.segments}조각 · 음성 {t.speech_segments}개
+                  {t.files.length ? ` · ${t.files[0].slice(0, 26)}` : " · 효과음만"}
                 </option>
               ))}
             </select>
@@ -206,7 +240,7 @@ export default function CapCutPanel({ lang, onLangChange, onSubmit, disabled }: 
           </div>
           <button
             disabled={!ready || disabled}
-            onClick={() => script && onSubmit(selected, script, lang, timeline || null)}
+            onClick={() => script && onSubmit(selected, script, lang, timeline || null, audioTrack)}
             className="px-6 py-2 rounded-lg bg-accent text-bg font-semibold disabled:opacity-30 disabled:cursor-not-allowed"
           >
             정렬 시작

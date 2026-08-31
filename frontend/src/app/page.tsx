@@ -50,11 +50,12 @@ export default function Home() {
     project: string,
     script: File,
     l: Lang,
-    timeline: string | null
+    timeline: string | null,
+    audioTrack: number | null
   ) {
     setPhase({ kind: "aligning" });
     try {
-      const res = await alignAgainstCapCut(project, script, l, timeline);
+      const res = await alignAgainstCapCut(project, script, l, timeline, audioTrack);
       const audio = await fetchCombinedAudio(res.audio_url, `${project}.mp3`);
       setPhase({
         kind: "workspace",

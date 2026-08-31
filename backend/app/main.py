@@ -264,10 +264,11 @@ if LOCAL_MODE:
             raise _capcut_error(e) from e
 
     @app.get("/capcut/projects/{name}", dependencies=[Depends(require_auth)])
-    async def capcut_project(name: str, timeline: str | None = None):
+    async def capcut_project(name: str, timeline: str | None = None,
+                             audio_track: int | None = None):
         try:
             draft, _ = capcut.load_draft(name, timeline=timeline)
-            info = capcut.project_info(draft)
+            info = capcut.project_info(draft, track_index=audio_track)
             # A project can hold several timelines; without this the UI can
             # only ever see the main one.
             info["timelines"] = capcut.list_timelines(name)
@@ -282,6 +283,7 @@ if LOCAL_MODE:
         script: UploadFile = File(...),
         lang: str = Form(...),
         timeline: str = Form(""),
+        audio_track: int = Form(-1),
     ):
         if lang not in ALLOWED_LANGS:
             raise HTTPException(400, f"lang must be one of {ALLOWED_LANGS}")
@@ -321,7 +323,10 @@ if LOCAL_MODE:
 
         def _run():
             try:
-                built = capcut.build_speech_audio(draft, str(audio_path))
+                built = capcut.build_speech_audio(
+                    draft, str(audio_path),
+                    track_index=audio_track if audio_track >= 0 else None,
+                )
                 blocks = align(str(audio_path), str(script_path), lang)
                 try:
                     script_path.unlink()
