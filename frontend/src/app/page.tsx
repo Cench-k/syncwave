@@ -38,6 +38,7 @@ export default function Home() {
   const [local, setLocal] = useState(false);
   const [mode, setMode] = useState<Mode>("file");
   const [lang, setLang] = useState<Lang>("ko");
+  const [notice, setNotice] = useState<string | null>(null);
 
   useEffect(() => {
     setSavedSession(loadSession());
@@ -57,6 +58,15 @@ export default function Home() {
     try {
       const res = await alignAgainstCapCut(project, script, l, timeline, audioTrack);
       const audio = await fetchCombinedAudio(res.audio_url, `${project}.mp3`);
+      const skipped = res.capcut?.skipped ?? [];
+      if (skipped.length) {
+        // Those stretches came out silent, so subtitles near them can drift.
+        setNotice(
+          `음성 ${skipped.length}조각을 읽지 못해 건너뛰었습니다 (${skipped
+            .slice(0, 2)
+            .join(", ")}${skipped.length > 2 ? " …" : ""}). 그 구간 근처 자막이 어긋날 수 있습니다.`
+        );
+      }
       setPhase({
         kind: "workspace",
         audio,
@@ -102,6 +112,7 @@ export default function Home() {
         lang={phase.lang}
         capcutProject={phase.capcutProject}
         capcutTimeline={phase.capcutTimeline}
+        notice={notice}
         cuts={phase.cuts}
         onReset={() => setPhase({ kind: "home" })}
       />

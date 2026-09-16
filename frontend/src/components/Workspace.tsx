@@ -21,6 +21,8 @@ interface Props {
   capcutTimeline?: string | null;
   /** Timeline positions where CapCut cut the speech audio, for edge snapping. */
   cuts?: number[];
+  /** Surfaced once on entry, e.g. audio that could not be read. */
+  notice?: string | null;
 }
 
 const NUDGE = 0.1;
@@ -33,6 +35,7 @@ export default function Workspace({
   capcutProject = null,
   capcutTimeline = null,
   cuts = [],
+  notice = null,
 }: Props) {
   const [blocks, setBlocks] = useState<Block[]>(initialBlocks);
   const [currentTime, setCurrentTime] = useState(0);
@@ -44,6 +47,11 @@ export default function Workspace({
   const [preview, setPreview] = useState(true);
   const controlsRef = useRef<WaveControls | null>(null);
   const toast = useToast();
+
+  useEffect(() => {
+    if (notice) toast.show(`⚠ ${notice}`);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [notice]);
 
   // Shaping settings are a per-user preference, not per-session data.
   useEffect(() => {

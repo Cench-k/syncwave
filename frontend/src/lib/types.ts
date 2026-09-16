@@ -19,6 +19,11 @@ export interface CapCutBuildInfo {
   segments: number;
   files: string[];
   duration: number;
+  /** Files whose obfuscation was undone, or that fell back to a plain sibling. */
+  repaired?: string[];
+  /** Clips that could not be read; those stretches are silent. */
+  skipped?: string[];
+  missing?: string[];
   /** Timeline positions where each piece of speech audio starts. */
   boundaries: number[];
 }

@@ -366,6 +366,66 @@ def _atempo_chain(speed: float) -> List[float]:
     return stages
 
 
+XOR_PROBE = 4096
+
+
+def deobfuscate_wav(src: Path, dest_dir: Path) -> Optional[Path]:
+    """Recover a CapCut-obfuscated WAV, or None if it is not one.
+
+    CapCut writes some of its own generated audio (TTS under
+    Resources/audioAlg) XOR'd with a single byte, so ffmpeg reports "Invalid
+    data found when processing input" on a file that is otherwise fine. The
+    key differs per file, so derive it from the first byte — a WAV must start
+    with 'R' — and only accept the result when "RIFF" and "WAVE" both land
+    where they belong. That check is specific enough that a genuine mp3 or a
+    truly corrupt file falls through untouched.
+
+    Verified on two clips: keys 0x9c and 0xbd, both decoding to 44.1kHz stereo
+    pcm_s16le whose duration matched the microsecond count in the filename.
+    """
+    try:
+        with src.open("rb") as f:
+            head = f.read(12)
+    except OSError:
+        return None
+    if len(head) < 12 or head[:4] == b"RIFF":
+        return None
+    key = head[0] ^ ord("R")
+    if not key:
+        return None
+    decoded_head = bytes(b ^ key for b in head)
+    if decoded_head[:4] != b"RIFF" or decoded_head[8:12] != b"WAVE":
+        return None
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / f"deobf_{abs(hash(str(src))) % 10**10}.wav"
+    try:
+        with src.open("rb") as fin, dest.open("wb") as fout:
+            while chunk := fin.read(1 << 20):
+                fout.write(bytes(b ^ key for b in chunk))
+    except OSError:
+        return None
+    return dest
+
+
+def _readable_variant(path: str) -> Optional[str]:
+    """A sibling of `path` that is plain RIFF, if CapCut left one.
+
+    Alongside an obfuscated `<name>.wav` there is often a decodable
+    `<name>.wav_download.wav`.
+    """
+    p = Path(path)
+    stem = re.sub(r"(_human|_upload|_download)$", "", p.stem)
+    for candidate in (p.with_name(stem + ".wav_download.wav"),
+                      p.with_name(stem + ".wav")):
+        if candidate != p and candidate.is_file():
+            try:
+                if candidate.open("rb").read(4) == b"RIFF":
+                    return candidate.as_posix()
+            except OSError:
+                continue
+    return None
+
+
 SILENCE_FLOOR_DB = -80.0
 
 
@@ -410,7 +470,24 @@ def build_speech_audio(draft: dict, out_path: str, only_paths: Optional[Iterable
     work = Path(out_path).with_suffix(".parts")
     work.mkdir(exist_ok=True)
     placed = 0
+    failed: List[str] = []
+    repaired: List[str] = []
     try:
+        # Some CapCut-generated audio is stored XOR-obfuscated, and some has a
+        # plain sibling next to it. Sort that out once per file rather than
+        # failing partway through the segment loop.
+        usable: Dict[str, str] = {}
+        for path in list(speech):
+            fixed = deobfuscate_wav(Path(path), work)
+            if fixed is not None:
+                usable[path] = fixed.as_posix()
+                repaired.append(os.path.basename(path))
+                continue
+            sibling = _readable_variant(path)
+            usable[path] = sibling if sibling else path
+            if sibling:
+                repaired.append(os.path.basename(path))
+
         for path, segs in speech.items():
             for i, seg in enumerate(segs):
                 if seg["srcdur"] <= 0:
@@ -420,7 +497,7 @@ def build_speech_audio(draft: dict, out_path: str, only_paths: Optional[Iterable
                 # only its own slice and the inputs stay independent.
                 cmd = ["ffmpeg", "-y", "-v", "error",
                        "-ss", f"{seg['src']:.6f}", "-t", f"{seg['srcdur']:.6f}",
-                       "-i", path]
+                       "-i", usable.get(path, path)]
                 if abs(seg["speed"] - 1.0) > 1e-6:
                     chain = ",".join(f"atempo={s:.6f}" for s in _atempo_chain(seg["speed"]))
                     cmd += ["-filter:a", chain]
@@ -428,10 +505,11 @@ def build_speech_audio(draft: dict, out_path: str, only_paths: Optional[Iterable
                 proc = subprocess.run(cmd, capture_output=True, text=True,
                                       encoding="utf-8", errors="replace")
                 if proc.returncode != 0 or not piece.exists():
-                    raise CapCutError(
-                        f"음성 조각 추출 실패 ({os.path.basename(path)} @{seg['src']:.2f}s): "
-                        + (proc.stderr or "")[-300:]
-                    )
+                    # Skip and report: one unreadable clip should not throw
+                    # away a whole narration. That stretch stays silent.
+                    failed.append(f"{os.path.basename(path)} @{seg['src']:.2f}s")
+                    piece.unlink(missing_ok=True)
+                    continue
                 # format="wav" makes pydub use its own wav reader; without it
                 # it shells out to ffprobe to sniff the format, which would
                 # mean shipping a second 200MB binary in the desktop build.
@@ -445,7 +523,8 @@ def build_speech_audio(draft: dict, out_path: str, only_paths: Optional[Iterable
         shutil.rmtree(work, ignore_errors=True)
 
     if placed == 0:
-        raise CapCutError("재구성할 음성 조각이 없습니다")
+        detail = ("; ".join(failed[:3]) + (" …" if len(failed) > 3 else "")) if failed else ""
+        raise CapCutError("재구성할 음성 조각이 없습니다" + (f" (실패: {detail})" if detail else ""))
 
     fmt = Path(out_path).suffix.lstrip(".").lower() or "wav"
     timeline.export(out_path, format="mp3" if fmt == "mp3" else fmt)
@@ -459,6 +538,8 @@ def build_speech_audio(draft: dict, out_path: str, only_paths: Optional[Iterable
         "segments": placed,
         "files": [os.path.basename(p) for p in speech],
         "missing": missing,
+        "skipped": failed,
+        "repaired": sorted(set(repaired)),
         "duration": round(len(timeline) / 1000, 3),
         "audio_track": track_index if track_index is not None else default_audio_track(draft, base_dir=base_dir),
         # Where each piece of speech audio starts on the timeline. Those cuts
