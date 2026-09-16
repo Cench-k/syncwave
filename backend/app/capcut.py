@@ -191,7 +191,42 @@ def load_draft(name: str, root: Optional[Path] = None,
         return json.load(f), path
 
 
-def audio_tracks(draft: dict, types: Iterable[str] = SPEECH_TYPES) -> List[dict]:
+_PLACEHOLDER_RE = re.compile(r"##_draftpath_placeholder_[^#]*_##")
+
+
+def resolve_material_path(path: str, base_dir: Optional[Path]) -> str:
+    """Turn a stored media path into one that exists on disk.
+
+    Media living inside the project folder is recorded as
+    `##_draftpath_placeholder_<uuid>_##/Resources/...` so the draft stays
+    portable. Taken literally that path does not exist, which showed up as
+    "파일 없음" for a clip CapCut had generated itself — 50 of the drafts here
+    use the token, mostly for CapCut's own TTS under Resources/audioAlg.
+
+    The token stands for the project directory. Some drafts also keep a copy
+    of the same tree under a `{guid}` subfolder, so that is tried second.
+    """
+    if not path:
+        return ""
+    normalised = path.replace("\\", "/")
+    if "_draftpath_placeholder_" not in normalised:
+        return normalised
+    tail = _PLACEHOLDER_RE.sub("", normalised).lstrip("/")
+    if base_dir is None:
+        return normalised
+    direct = Path(base_dir) / tail
+    if direct.is_file():
+        return direct.as_posix()
+    for child in sorted(Path(base_dir).glob("{*}")):
+        candidate = child / tail
+        if candidate.is_file():
+            return candidate.as_posix()
+    # Report where we expected it, so the UI names a real path.
+    return direct.as_posix()
+
+
+def audio_tracks(draft: dict, types: Iterable[str] = SPEECH_TYPES,
+                 base_dir: Optional[Path] = None) -> List[dict]:
     """Audio tracks in timeline order, with what each one carries.
 
     CapCut stacks audio below the video, nearest first, and `tracks` keeps
@@ -215,7 +250,8 @@ def audio_tracks(draft: dict, types: Iterable[str] = SPEECH_TYPES) -> List[dict]
             covered += dur
             if mat.get("type") in types:
                 speech += 1
-                base = os.path.basename((mat.get("path") or "").replace("\\", "/"))
+                base = os.path.basename(
+                    resolve_material_path(mat.get("path") or "", base_dir))
                 files[base] = files.get(base, 0.0) + dur
         out.append({
             "index": i,
@@ -228,16 +264,18 @@ def audio_tracks(draft: dict, types: Iterable[str] = SPEECH_TYPES) -> List[dict]
     return out
 
 
-def default_audio_track(draft: dict, types: Iterable[str] = SPEECH_TYPES) -> Optional[int]:
+def default_audio_track(draft: dict, types: Iterable[str] = SPEECH_TYPES,
+                        base_dir: Optional[Path] = None) -> Optional[int]:
     """Index of the narration track: the topmost audio track that has speech."""
-    for t in audio_tracks(draft, types):
+    for t in audio_tracks(draft, types, base_dir):
         if t["speech_segments"]:
             return t["index"]
     return None
 
 
 def speech_segments(draft: dict, types: Iterable[str] = SPEECH_TYPES,
-                    track_index: Optional[int] = None) -> Dict[str, List[dict]]:
+                    track_index: Optional[int] = None,
+                    base_dir: Optional[Path] = None) -> Dict[str, List[dict]]:
     """Spoken-audio segments grouped by source file path, timeline-ordered.
 
     Restricted to a single audio track. Sweeping every track pulled sound
@@ -248,7 +286,7 @@ def speech_segments(draft: dict, types: Iterable[str] = SPEECH_TYPES,
     """
     types = set(types)
     if track_index is None:
-        track_index = default_audio_track(draft, types)
+        track_index = default_audio_track(draft, types, base_dir)
     mats = {m["id"]: m for m in draft.get("materials", {}).get("audios", [])}
     by_path: Dict[str, List[dict]] = defaultdict(list)
     for i, track in enumerate(draft.get("tracks", [])):
@@ -258,7 +296,7 @@ def speech_segments(draft: dict, types: Iterable[str] = SPEECH_TYPES,
             mat = mats.get(seg.get("material_id"))
             if not mat or mat.get("type") not in types:
                 continue
-            path = (mat.get("path") or "").replace("\\", "/")
+            path = resolve_material_path(mat.get("path") or "", base_dir)
             if not path:
                 continue
             tgt = seg.get("target_timerange") or {}
@@ -276,10 +314,11 @@ def speech_segments(draft: dict, types: Iterable[str] = SPEECH_TYPES,
     return dict(by_path)
 
 
-def project_info(draft: dict, track_index: Optional[int] = None) -> dict:
+def project_info(draft: dict, track_index: Optional[int] = None,
+                 base_dir: Optional[Path] = None) -> dict:
     if track_index is None:
-        track_index = default_audio_track(draft)
-    speech = speech_segments(draft, track_index=track_index)
+        track_index = default_audio_track(draft, base_dir=base_dir)
+    speech = speech_segments(draft, track_index=track_index, base_dir=base_dir)
     files = []
     for path, segs in sorted(speech.items(), key=lambda kv: -sum(s["tldur"] for s in kv[1])):
         files.append({
@@ -305,7 +344,7 @@ def project_info(draft: dict, track_index: Optional[int] = None) -> dict:
         "canvas": draft.get("canvas_config") or {},
         "speech_files": files,
         "text_tracks": text_tracks,
-        "audio_tracks": audio_tracks(draft),
+        "audio_tracks": audio_tracks(draft, base_dir=base_dir),
         "audio_track": track_index,
     }
 
@@ -331,7 +370,8 @@ SILENCE_FLOOR_DB = -80.0
 
 
 def build_speech_audio(draft: dict, out_path: str, only_paths: Optional[Iterable[str]] = None,
-                       track_index: Optional[int] = None) -> dict:
+                       track_index: Optional[int] = None,
+                       base_dir: Optional[Path] = None) -> dict:
     """Render the spoken track exactly as the timeline plays it.
 
     Each segment is cut from its source file, re-timed for the segment's speed
@@ -345,15 +385,20 @@ def build_speech_audio(draft: dict, out_path: str, only_paths: Optional[Iterable
     "aligned" into evenly spaced nonsense. One short call per segment costs a
     few seconds next to Whisper and cannot fail that way.
     """
-    speech = speech_segments(draft, track_index=track_index)
+    speech = speech_segments(draft, track_index=track_index, base_dir=base_dir)
     if only_paths is not None:
         wanted = set(only_paths)
         speech = {p: s for p, s in speech.items() if p in wanted}
-    missing = [p for p in speech if not os.path.exists(p)]
-    if missing:
-        raise CapCutError("음성 파일을 찾을 수 없습니다: " + ", ".join(os.path.basename(p) for p in missing))
+    # Skip what we cannot read instead of refusing the whole job: a missing
+    # 1.6s clip should not block a two-minute narration. Those stretches come
+    # out silent, so the caller reports them.
+    missing = sorted(os.path.basename(p) for p in speech if not os.path.exists(p))
+    speech = {p: segs for p, segs in speech.items() if os.path.exists(p)}
     if not speech:
-        raise CapCutError("이 프로젝트에서 음성 트랙을 찾지 못했습니다")
+        raise CapCutError(
+            "읽을 수 있는 음성 파일이 없습니다"
+            + (" (없는 파일: " + ", ".join(missing) + ")" if missing else "")
+        )
 
     total = draft.get("duration", 0) / US
     if total <= 0:
@@ -413,8 +458,9 @@ def build_speech_audio(draft: dict, out_path: str, only_paths: Optional[Iterable
     return {
         "segments": placed,
         "files": [os.path.basename(p) for p in speech],
+        "missing": missing,
         "duration": round(len(timeline) / 1000, 3),
-        "audio_track": track_index if track_index is not None else default_audio_track(draft),
+        "audio_track": track_index if track_index is not None else default_audio_track(draft, base_dir=base_dir),
         # Where each piece of speech audio starts on the timeline. Those cuts
         # were made by hand at line boundaries, so they anchor subtitle starts
         # better than Whisper's word timestamps — the caller snaps to them.

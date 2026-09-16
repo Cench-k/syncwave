@@ -71,7 +71,10 @@ export default function CapCutPanel({ lang, onLangChange, onSubmit, disabled }: 
   }, [selected, timeline, audioTrack]);
 
   const missing = info?.speech_files.filter((f) => !f.exists) ?? [];
-  const ready = Boolean(selected && script && info && info.speech_files.length > 0 && !missing.length);
+  const usable = (info?.speech_files.length ?? 0) - missing.length;
+  // A missing clip no longer blocks the job — the backend skips it and that
+  // stretch comes out silent. Only refuse when nothing at all is readable.
+  const ready = Boolean(selected && script && info && usable > 0);
 
   return (
     <div className="w-full max-w-2xl mx-auto">
@@ -188,6 +191,14 @@ export default function CapCutPanel({ lang, onLangChange, onSubmit, disabled }: 
                 음성 트랙을 찾지 못했습니다. 캡컷에서 넣은 음성(효과음 제외)이 있어야 합니다.
               </p>
             ) : (
+              <>
+              {missing.length > 0 && (
+                <p className="mb-2 text-amber-300">
+                  파일 {missing.length}개를 찾을 수 없어 건너뜁니다 (합계{" "}
+                  {missing.reduce((a, f) => a + f.coverage, 0).toFixed(1)}초). 그 구간은
+                  무음으로 처리되므로 근처 자막이 어긋날 수 있습니다.
+                </p>
+              )}
               <ul className="space-y-0.5">
                 {info.speech_files.map((f) => (
                   <li key={f.path} className={f.exists ? "text-muted" : "text-red-300"}>
@@ -200,6 +211,7 @@ export default function CapCutPanel({ lang, onLangChange, onSubmit, disabled }: 
                   </li>
                 ))}
               </ul>
+              </>
             )}
           </div>
         )}

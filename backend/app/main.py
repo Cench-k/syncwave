@@ -268,7 +268,9 @@ if LOCAL_MODE:
                              audio_track: int | None = None):
         try:
             draft, _ = capcut.load_draft(name, timeline=timeline)
-            info = capcut.project_info(draft, track_index=audio_track)
+            info = capcut.project_info(
+                draft, track_index=audio_track, base_dir=capcut.project_dir(name)
+            )
             # A project can hold several timelines; without this the UI can
             # only ever see the main one.
             info["timelines"] = capcut.list_timelines(name)
@@ -326,6 +328,7 @@ if LOCAL_MODE:
                 built = capcut.build_speech_audio(
                     draft, str(audio_path),
                     track_index=audio_track if audio_track >= 0 else None,
+                    base_dir=capcut.project_dir(project),
                 )
                 blocks = align(str(audio_path), str(script_path), lang)
                 try:
