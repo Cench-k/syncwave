@@ -1,15 +1,34 @@
 "use client";
 import { useEffect, useState } from "react";
-import { Block, CapCutProjectInfo, CapCutStyle, CapCutWriteResult } from "@/lib/types";
+import {
+  Block,
+  CapCutFont,
+  CapCutProjectInfo,
+  CapCutStyle,
+  CapCutWriteResult,
+} from "@/lib/types";
 import {
   EditorOpenError,
   getCapCutProject,
+  listCapCutFonts,
   listCapCutStyles,
   verifyCapCutTrack,
   writeCapCutSubtitles,
 } from "@/lib/api";
 
 const STYLE_KEY = "syncwave:styleFrom";
+const FONT_KEY = "syncwave:font";
+const POS_KEY = "syncwave:posY";
+
+// Positive y is up. Verified against the user's drafts: subtitles sit at
+// -0.44..-0.60 and the occasional title at +0.83.
+const POSITIONS: { id: string; label: string; y: number | null }[] = [
+  { id: "", label: "스타일 그대로", y: null },
+  { id: "bottom", label: "하단", y: -0.53 },
+  { id: "middle", label: "중앙", y: 0 },
+  { id: "top", label: "상단", y: 0.8 },
+  { id: "custom", label: "직접 입력", y: null },
+];
 
 interface Props {
   project: string;
@@ -30,6 +49,10 @@ export default function CapCutWriteButton({ project, timeline = null, blocks, on
   const [confirmedClosed, setConfirmedClosed] = useState(false);
   const [styles, setStyles] = useState<CapCutStyle[]>([]);
   const [styleFrom, setStyleFrom] = useState("");
+  const [fonts, setFonts] = useState<CapCutFont[]>([]);
+  const [font, setFont] = useState("");
+  const [posId, setPosId] = useState("");
+  const [posPx, setPosPx] = useState("");
 
   useEffect(() => {
     if (!open) return;
@@ -46,7 +69,30 @@ export default function CapCutWriteButton({ project, timeline = null, blocks, on
         if (saved && s.some((x) => x.project === saved)) setStyleFrom(saved);
       })
       .catch(() => setStyles([]));
+    listCapCutFonts()
+      .then((f) => {
+        setFonts(f);
+        const saved = localStorage.getItem(FONT_KEY) || "";
+        if (saved && f.some((x) => x.key === saved)) setFont(saved);
+      })
+      .catch(() => setFonts([]));
+    const savedPos = localStorage.getItem(POS_KEY);
+    if (savedPos) {
+      setPosId("custom");
+      setPosPx(savedPos);
+    }
   }, [open, project, timeline]);
+
+  const canvasH = info?.canvas?.height || 1920;
+
+  /** Normalised y to send, or null to keep the cloned style's own position. */
+  function resolvePosY(): number | null {
+    if (posId === "custom") {
+      const px = parseFloat(posPx);
+      return Number.isFinite(px) ? px / canvasH : null;
+    }
+    return POSITIONS.find((p) => p.id === posId)?.y ?? null;
+  }
 
   async function write() {
     setBusy(true);
@@ -62,8 +108,13 @@ export default function CapCutWriteButton({ project, timeline = null, blocks, on
         force: confirmedClosed,
         style_from: styleFrom || null,
         timeline,
+        font: font || null,
+        pos_y: resolvePosY(),
       });
       if (styleFrom) localStorage.setItem(STYLE_KEY, styleFrom);
+      if (font) localStorage.setItem(FONT_KEY, font);
+      if (posId === "custom" && posPx) localStorage.setItem(POS_KEY, posPx);
+      else if (posId !== "custom") localStorage.removeItem(POS_KEY);
       setResult(r);
       onDone(`캡컷에 자막 ${r.written}개 기록됨`);
       // CapCut can save over us seconds later, so check without being asked.
@@ -243,6 +294,55 @@ export default function CapCutWriteButton({ project, timeline = null, blocks, on
                 <p className="text-[11px] text-muted/60 mb-4">
                   글꼴·크기·색·테두리·위치를 고른 프로젝트의 자막에서 그대로 복제합니다.
                   자동은 포맷이 다른 프로젝트를 집을 수 있으니, 한 번 골라두면 다음에도 기억합니다.
+                </p>
+
+                <label className="block text-xs text-muted mb-1">글꼴</label>
+                <select
+                  value={font}
+                  onChange={(e) => setFont(e.target.value)}
+                  className="w-full bg-bg border border-border rounded px-2 py-1.5 text-sm focus:border-accent outline-none mb-1"
+                >
+                  <option value="">스타일 그대로</option>
+                  {fonts.map((f) => (
+                    <option key={f.key} value={f.key}>
+                      {f.label} · {f.uses.toLocaleString()}회 사용
+                    </option>
+                  ))}
+                </select>
+                <p className="text-[11px] text-muted/60 mb-4">
+                  캡컷이 실제로 가진 글꼴만 고를 수 있습니다. 글꼴은 이름이 아니라 캐시된
+                  리소스로 지정되기 때문에, 내 드래프트에 쓰인 적 있는 것만 목록에 뜹니다.
+                </p>
+
+                <label className="block text-xs text-muted mb-1">자막 위치</label>
+                <select
+                  value={posId}
+                  onChange={(e) => setPosId(e.target.value)}
+                  className="w-full bg-bg border border-border rounded px-2 py-1.5 text-sm focus:border-accent outline-none mb-1"
+                >
+                  {POSITIONS.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.label}
+                      {p.y !== null && ` (y=${Math.round(p.y * canvasH)})`}
+                    </option>
+                  ))}
+                </select>
+                {posId === "custom" && (
+                  <div className="flex items-center gap-2 mb-1">
+                    <input
+                      type="number"
+                      value={posPx}
+                      onChange={(e) => setPosPx(e.target.value)}
+                      placeholder="-1017"
+                      className="w-32 bg-bg border border-border rounded px-2 py-1.5 text-sm focus:border-accent outline-none"
+                    />
+                    <span className="text-[11px] text-muted/60">
+                      캡컷 인스펙터의 Y 값. 음수가 아래쪽입니다.
+                    </span>
+                  </div>
+                )}
+                <p className="text-[11px] text-muted/60 mb-4">
+                  캔버스 높이 {canvasH}px 기준입니다. &lsquo;스타일 그대로&rsquo;면 복제한 자막의 위치를 그대로 씁니다.
                 </p>
 
                 <p className="text-xs text-muted mb-4">자막 {blocks.length}개를 씁니다.</p>

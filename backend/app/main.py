@@ -9,6 +9,7 @@ Local-only (registered only when SYNCWAVE_LOCAL is set — see LOCAL_MODE):
   GET  /capcut/projects        — CapCut drafts on this machine
   GET  /capcut/projects/{name} — fps, duration, speech files, text tracks
   POST /capcut/align           — align a script against a draft's timeline audio
+  GET  /capcut/fonts           — fonts available in the user's drafts
   POST /capcut/write           — write finished subtitles into the draft
 """
 from __future__ import annotations
@@ -348,6 +349,12 @@ if LOCAL_MODE:
         """Recent projects whose subtitle style can be copied."""
         return {"styles": capcut.style_candidates()}
 
+    @app.get("/capcut/fonts", dependencies=[Depends(require_auth)])
+    async def capcut_fonts():
+        """Fonts present in the user's own drafts — the only ones CapCut can
+        actually resolve, since a font is a cached resource id, not a name."""
+        return {"fonts": capcut.font_candidates()}
+
     @app.post("/capcut/write", dependencies=[Depends(require_auth)])
     async def capcut_write(payload: dict):
         project = payload.get("project")
@@ -363,6 +370,8 @@ if LOCAL_MODE:
                 force=bool(payload.get("force")),
                 style_from=payload.get("style_from") or None,
                 timeline=payload.get("timeline") or None,
+                font=payload.get("font") or None,
+                pos_y=payload.get("pos_y"),
             )
         except capcut.EditorOpenError as e:
             # 409 so the client can offer "close CapCut and retry" rather than

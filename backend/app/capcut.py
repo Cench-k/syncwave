@@ -612,6 +612,102 @@ def describe_style(template: tuple[dict, dict], canvas_height: int = 1920) -> di
     }
 
 
+def font_candidates(root: Optional[Path] = None, limit: int = 40) -> List[dict]:
+    """Fonts the user actually has, harvested from their own drafts.
+
+    A font is not a name — CapCut resolves it through `font_resource_id` and a
+    cached `font_path`. Inventing either gives a caption that silently falls
+    back to the default face, so the only fonts we can offer are ones already
+    present in the user's drafts.
+    """
+    seen = {}
+    try:
+        projects = list_projects(root)
+    except CapCutError:
+        return []
+    for entry in projects[:limit]:
+        try:
+            draft, _ = load_draft(entry["name"], root)
+        except (CapCutError, json.JSONDecodeError, OSError):
+            continue
+        for mat in draft.get("materials", {}).get("texts", []):
+            rid = (mat.get("font_resource_id") or "").strip()
+            path = (mat.get("font_path") or "").strip()
+            if path and not os.path.exists(path):
+                # A cache CapCut has since cleaned; offering it would render
+                # as the default face without saying so.
+                continue
+            # CapCut's built-in face lives under the app version directory, so
+            # every upgrade looks like a new font. Collapse those by filename.
+            key = rid or ("sys:" + os.path.basename(path).lower() if path else "")
+            if not key:
+                continue
+            title = (mat.get("font_title") or "").strip()
+            hit = seen.get(key)
+            if hit is None:
+                hit = seen[key] = {
+                    "key": key,
+                    "resource_id": rid,
+                    "path": path,
+                    "title": "" if title in ("", "none") else title,
+                    "fonts": mat.get("fonts") or [],
+                    "uses": 0,
+                    "seen_in": entry["name"],
+                }
+            # CapCut leaves font_title as "none" on most segments; keep the
+            # first real name we find so the picker has a readable label.
+            if not hit["title"] and title and title != "none":
+                hit["title"] = title
+            if not hit["fonts"] and mat.get("fonts"):
+                hit["fonts"] = mat["fonts"]
+            if not rid and path > hit["path"]:
+                hit["path"] = path   # keep the newest app version's copy
+            hit["uses"] += 1
+    out = sorted(seen.values(), key=lambda f: -f["uses"])
+    for f in out:
+        f["label"] = f["title"] or ("캡컷 기본 글꼴" if not f["resource_id"]
+                                    else "글꼴 " + f["resource_id"][-6:])
+    return out
+
+
+def _apply_font(material: dict, font: dict) -> None:
+    """Point a cloned text material at a different cached font.
+
+    The reference lives in two places that must agree: the material's own
+    font_* fields and the `styles[].font` entry inside the embedded content
+    document. Setting only one leaves CapCut rendering the old face.
+    """
+    rid = font.get("resource_id") or ""
+    path = font.get("path") or ""
+    material["font_resource_id"] = rid
+    material["font_path"] = path
+    if font.get("title"):
+        material["font_title"] = font["title"]
+    material["fonts"] = copy.deepcopy(font.get("fonts") or [])
+
+    raw = material.get("content") or ""
+    try:
+        doc = json.loads(raw) if raw else {}
+    except json.JSONDecodeError:
+        return
+    for st in doc.get("styles") or []:
+        if not isinstance(st, dict):
+            continue
+        ref = st.setdefault("font", {})
+        if path:
+            ref["path"] = path
+        if rid:
+            ref["id"] = rid
+    material["content"] = json.dumps(doc, ensure_ascii=False)
+
+
+def _apply_position(segment: dict, y_norm: float) -> None:
+    """Move a caption vertically. CapCut's inspector shows y x canvas height."""
+    clip = segment.setdefault("clip", {})
+    tf = clip.setdefault("transform", {"x": 0.0, "y": 0.0})
+    tf["y"] = float(y_norm)
+
+
 def style_candidates(root: Optional[Path] = None, limit: int = 25) -> List[dict]:
     """Recent projects whose subtitles could be used as a style template."""
     out = []
@@ -857,6 +953,8 @@ def inject_subtitles(
     force: bool = False,
     style_from: Optional[str] = None,
     timeline: Optional[str] = None,
+    font: Optional[str] = None,
+    pos_y: Optional[float] = None,
 ) -> dict:
     """Write `blocks` (seconds, timeline clock) into the project as a text track.
 
@@ -916,6 +1014,15 @@ def inject_subtitles(
         if template is None:
             template = _borrow_style_template(root, skip=name)
             style_source = "borrowed" if template else "default"
+
+    font_choice = None
+    if font:
+        for cand in font_candidates(root):
+            if cand["key"] == font:
+                font_choice = cand
+                break
+        if font_choice is None:
+            raise CapCutError("고른 글꼴을 찾을 수 없습니다: " + font)
 
     materials = draft.setdefault("materials", {})
     texts = materials.setdefault("texts", [])
@@ -977,6 +1084,10 @@ def inject_subtitles(
         else:
             mat = _default_text_material(text)
             seg = _default_text_segment(mat["id"], anim["id"], start_us, dur_us)
+        if font_choice:
+            _apply_font(mat, font_choice)
+        if pos_y is not None:
+            _apply_position(seg, pos_y)
         new_texts.append(mat)
         new_anims.append(anim)
         segments.append(seg)

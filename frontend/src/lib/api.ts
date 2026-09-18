@@ -2,6 +2,7 @@ import {
   AlignResponse,
   Block,
   CapCutProject,
+  CapCutFont,
   CapCutProjectInfo,
   CapCutStyle,
   CapCutWriteResult,
@@ -139,6 +140,12 @@ export async function listCapCutStyles(): Promise<CapCutStyle[]> {
   return (await r.json()).styles;
 }
 
+export async function listCapCutFonts(): Promise<CapCutFont[]> {
+  const r = await fetch(`${BASE}/capcut/fonts`);
+  if (!r.ok) throw new Error(await errText(r, "글꼴 목록을 읽지 못했습니다"));
+  return (await r.json()).fonts;
+}
+
 export async function writeCapCutSubtitles(payload: {
   project: string;
   blocks: Block[];
@@ -147,6 +154,8 @@ export async function writeCapCutSubtitles(payload: {
   force?: boolean;
   style_from?: string | null;
   timeline?: string | null;
+  font?: string | null;
+  pos_y?: number | null;
 }): Promise<CapCutWriteResult> {
   const r = await fetch(`${BASE}/capcut/write`, {
     method: "POST",

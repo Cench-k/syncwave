@@ -84,6 +84,17 @@ export interface CapCutProjectInfo {
   audio_track: number | null;
 }
 
+/** A font CapCut can actually resolve: a cached resource, not a name. */
+export interface CapCutFont {
+  key: string;
+  label: string;
+  title: string;
+  resource_id: string;
+  path: string;
+  uses: number;
+  seen_in: string;
+}
+
 /** A subtitle look that can be cloned, as CapCut's inspector shows it. */
 export interface CapCutStyle {
   project: string;
