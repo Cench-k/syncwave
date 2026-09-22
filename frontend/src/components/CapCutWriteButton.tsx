@@ -22,6 +22,14 @@ const FONT_KEY = "syncwave:font";
 // one canvas height, and -1017px on a 1920 short is off-screen on a 1080 video.
 const POS_KEY = "syncwave:position";
 
+// Fixed caption looks, applied in full on the backend (capcut.CAPTION_PRESETS).
+// Default follows the canvas: 야담 is landscape, the shorts are portrait.
+const PRESETS: { id: string; label: string; desc: string }[] = [
+  { id: "yadam", label: "야담", desc: "고딕체 8 · y=-570 · 검은 배경 50% · 흰 글씨" },
+  { id: "shortdrama", label: "숏폼드라마", desc: "배달의민족주아체 16 · y=-850 · 검은 테두리 30" },
+  { id: "", label: "직접 설정", desc: "기존 자막 스타일을 복제하고 글꼴·위치만 고릅니다" },
+];
+
 // Positive y is up. Verified against the user's drafts: subtitles sit at
 // -0.44..-0.60 and the occasional title at +0.83.
 const POSITIONS: { id: string; label: string; y: number | null }[] = [
@@ -56,13 +64,22 @@ export default function CapCutWriteButton({ project, timeline = null, blocks, on
   const [posId, setPosId] = useState("");
   const [posPx, setPosPx] = useState("");
   const [savedCustomY, setSavedCustomY] = useState<number | null>(null);
+  const [preset, setPreset] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open) return;
     setError(null);
+    setPreset(null);
     getCapCutProject(project, timeline)
-      .then(setInfo)
-      .catch((e) => setError(String(e.message || e)));
+      .then((i) => {
+        setInfo(i);
+        const c = i.canvas;
+        setPreset((c?.width ?? 0) < (c?.height ?? 0) ? "shortdrama" : "yadam");
+      })
+      .catch((e) => {
+        setError(String(e.message || e));
+        setPreset("");
+      });
     listCapCutStyles()
       .then((s) => {
         setStyles(s);
@@ -123,13 +140,16 @@ export default function CapCutWriteButton({ project, timeline = null, blocks, on
         force: confirmedClosed,
         style_from: styleFrom || null,
         timeline,
-        font: font || null,
-        pos_y: resolvePosY(),
+        font: preset ? null : font || null,
+        pos_y: preset ? null : resolvePosY(),
+        preset: preset || null,
       });
-      if (styleFrom) localStorage.setItem(STYLE_KEY, styleFrom);
-      if (font) localStorage.setItem(FONT_KEY, font);
-      else localStorage.removeItem(FONT_KEY);
-      localStorage.setItem(POS_KEY, JSON.stringify({ id: posId, y: resolvePosY() }));
+      if (!preset) {
+        if (styleFrom) localStorage.setItem(STYLE_KEY, styleFrom);
+        if (font) localStorage.setItem(FONT_KEY, font);
+        else localStorage.removeItem(FONT_KEY);
+        localStorage.setItem(POS_KEY, JSON.stringify({ id: posId, y: resolvePosY() }));
+      }
       setResult(r);
       onDone(`캡컷에 자막 ${r.written}개 기록됨`);
       // CapCut can save over us seconds later, so check without being asked.
@@ -211,6 +231,8 @@ export default function CapCutWriteButton({ project, timeline = null, blocks, on
                     {result.style_source === "sibling" && "스타일: 같은 프로젝트의 다른 타임라인 자막에서 가져왔습니다."}
                     {result.style_source === "borrowed" && "스타일: 이 프로젝트엔 자막이 없어 최근 다른 프로젝트에서 가져왔습니다."}
                     {result.style_source === "default" && "스타일: 참고할 자막이 없어 기본 스타일로 넣었습니다."}
+                    {result.style_source.startsWith("preset:") &&
+                      `스타일: ${result.style_source.slice(7)} 캡션 프리셋을 적용했습니다.`}
                     {result.style_source.startsWith("project:") &&
                       `스타일: ${result.style_source.slice(8)} 에서 복제했습니다.`}
                   </div>
@@ -291,6 +313,32 @@ export default function CapCutWriteButton({ project, timeline = null, blocks, on
                   ))}
                 </select>
 
+                <label className="block text-xs text-muted mb-1">캡션 프리셋</label>
+                <div className="grid grid-cols-3 gap-2 mb-1">
+                  {PRESETS.map((p) => (
+                    <button
+                      key={p.id}
+                      type="button"
+                      onClick={() => setPreset(p.id)}
+                      className={`px-2 py-1.5 rounded border text-sm ${
+                        preset === p.id
+                          ? "border-accent text-accent bg-accent/10"
+                          : "border-border text-muted hover:text-white"
+                      }`}
+                    >
+                      {p.label}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[11px] text-muted/60 mb-4">
+                  {preset === null
+                    ? "프로젝트 정보를 불러오는 중…"
+                    : PRESETS.find((p) => p.id === preset)?.desc}
+                  {preset && " — 항상 캡션으로 넣습니다."}
+                </p>
+
+                {preset === "" && (
+                <>
                 <label className="block text-xs text-muted mb-1">자막 스타일</label>
                 <select
                   value={styleFrom}
@@ -359,6 +407,8 @@ export default function CapCutWriteButton({ project, timeline = null, blocks, on
                 <p className="text-[11px] text-muted/60 mb-4">
                   캔버스 높이 {canvasH}px 기준입니다. &lsquo;스타일 그대로&rsquo;면 복제한 자막의 위치를 그대로 씁니다.
                 </p>
+                </>
+                )}
 
                 <p className="text-xs text-muted mb-4">자막 {blocks.length}개를 씁니다.</p>
 
@@ -372,7 +422,7 @@ export default function CapCutWriteButton({ project, timeline = null, blocks, on
                   </button>
                   <button
                     onClick={write}
-                    disabled={busy || (Boolean(blocked) && !confirmedClosed)}
+                    disabled={busy || preset === null || (Boolean(blocked) && !confirmedClosed)}
                     className="px-4 py-1.5 rounded bg-accent text-bg font-medium disabled:opacity-40"
                   >
                     {busy ? "쓰는 중…" : blocked ? "확인했음 · 쓰기" : "쓰기"}

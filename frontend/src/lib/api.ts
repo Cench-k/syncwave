@@ -156,6 +156,7 @@ export async function writeCapCutSubtitles(payload: {
   timeline?: string | null;
   font?: string | null;
   pos_y?: number | null;
+  preset?: string | null;
 }): Promise<CapCutWriteResult> {
   const r = await fetch(`${BASE}/capcut/write`, {
     method: "POST",

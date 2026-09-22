@@ -379,6 +379,7 @@ if LOCAL_MODE:
                 timeline=payload.get("timeline") or None,
                 font=payload.get("font") or None,
                 pos_y=pos_y,
+                preset=payload.get("preset") or None,
             )
         except capcut.EditorOpenError as e:
             # 409 so the client can offer "close CapCut and retry" rather than

@@ -777,6 +777,146 @@ def _apply_font(material: dict, font: dict) -> None:
     material["content"] = json.dumps(doc, ensure_ascii=False)
 
 
+# Fixed caption looks, so a write never depends on whatever was used last.
+# Values are what CapCut's inspector shows; `_apply_preset` converts them.
+# The face itself can't be described by name (see font_candidates), so each
+# preset is anchored on a real caption in the user's drafts that uses it.
+CAPTION_PRESETS: Dict[str, dict] = {
+    "yadam": {
+        "label": "야담",
+        "font_title": "고딕체",
+        "size": 8,
+        "y_px": -570,
+        "color": "#FFFFFF",
+        "stroke": None,
+        "background": {"color": "#000000", "alpha": 0.5},
+    },
+    "shortdrama": {
+        "label": "숏폼드라마",
+        "font_title": "배달의민족주아체",
+        "size": 16,
+        "y_px": -850,
+        "color": "#FFFFFF",
+        "stroke": {"color": "#000000", "width": 30},
+        "background": None,
+    },
+}
+
+# check_flag bits seen on the user's captions: 15 with a stroke and no box,
+# 23 with a box and no stroke — 8 marks the stroke, 16 the background.
+_FLAG_BASE, _FLAG_STROKE, _FLAG_BG = 7, 8, 16
+
+
+def _rgb(hex_color: str) -> List[float]:
+    h = hex_color.lstrip("#")
+    return [int(h[i:i + 2], 16) / 255 for i in (0, 2, 4)]
+
+
+def _font_titles(material: dict) -> List[str]:
+    return [f.get("title") for f in (material.get("fonts") or []) if f.get("title")]
+
+
+def _find_caption_with_font(draft: dict, title: str) -> Optional[tuple[dict, dict]]:
+    """A caption using the named face whose cached font file still exists."""
+    texts = {m["id"]: m for m in draft.get("materials", {}).get("texts", [])}
+    for track in draft.get("tracks", []):
+        if track.get("type") != "text":
+            continue
+        for seg in track.get("segments", []):
+            mat = texts.get(seg.get("material_id"))
+            if (mat and mat.get("type") == CAPTION_TYPE and title in _font_titles(mat)
+                    and os.path.exists(mat.get("font_path") or "")):
+                return seg, mat
+    return None
+
+
+def _preset_template(
+    preset: dict, draft: dict, name: str, root: Optional[Path], timeline: Optional[str], limit: int = 40
+) -> Optional[tuple[dict, dict]]:
+    """A real caption in the preset's face: this timeline, its siblings, then recent projects."""
+    title = preset["font_title"]
+    found = _find_caption_with_font(draft, title)
+    if found:
+        return found
+    for other in list_timelines(name, root):
+        if not other["exists"] or other["id"] == timeline or not other["text_segments"]:
+            continue
+        try:
+            found = _find_caption_with_font(load_draft(name, root, other["id"])[0], title)
+        except (CapCutError, json.JSONDecodeError, OSError):
+            continue
+        if found:
+            return found
+    try:
+        projects = list_projects(root)
+    except CapCutError:
+        return None
+    for entry in projects[:limit]:
+        if entry["name"] == name:
+            continue
+        try:
+            found = _find_caption_with_font(load_draft(entry["name"], root)[0], title)
+        except (CapCutError, json.JSONDecodeError, OSError):
+            continue
+        if found:
+            return found
+    return None
+
+
+def _apply_preset(material: dict, segment: dict, preset: dict, canvas_height: int) -> None:
+    """Force a cloned caption to the preset's size, colours, stroke, box and place.
+
+    Every value lives twice — the material's flat fields and the `styles[]`
+    of its content document — and CapCut renders from the latter, so both
+    are written. The user's shorts captions showed why: material said
+    border_width 0.08 (the default) while the content held the real 0.06.
+    """
+    size = float(preset["size"])
+    stroke = preset.get("stroke")
+    bg = preset.get("background")
+
+    material["type"] = CAPTION_TYPE
+    material["font_size"] = size
+    material["text_color"] = preset["color"]
+    material["text_alpha"] = 1.0
+    if stroke:
+        # CapCut's 0-100 stroke slider maps onto 0-0.2.
+        width = stroke["width"] / 100 * 0.2
+        material["border_color"] = stroke["color"]
+        material["border_width"] = width
+        material["border_alpha"] = 1.0
+    else:
+        material["border_color"] = ""
+    if bg:
+        material["background_style"] = material.get("background_style") or 2
+        material["background_color"] = bg["color"]
+        material["background_alpha"] = float(bg["alpha"])
+    else:
+        material["background_style"] = 0
+        material["background_alpha"] = 1.0
+    material["check_flag"] = _FLAG_BASE | (_FLAG_STROKE if stroke else 0) | (_FLAG_BG if bg else 0)
+
+    raw = material.get("content") or ""
+    try:
+        doc = json.loads(raw) if raw else {}
+    except json.JSONDecodeError:
+        doc = {}
+    styles = doc.get("styles") if isinstance(doc.get("styles"), list) else []
+    for st in styles:
+        if not isinstance(st, dict):
+            continue
+        st["size"] = size
+        st["fill"] = {"content": {"render_type": "solid", "solid": {"color": _rgb(preset["color"])}}}
+        if stroke:
+            st["strokes"] = [{"content": {"render_type": "solid", "solid": {"color": _rgb(stroke["color"])}},
+                              "width": stroke["width"] / 100 * 0.2, "mode": 0}]
+        else:
+            st.pop("strokes", None)
+    material["content"] = json.dumps(doc, ensure_ascii=False)
+
+    _apply_position(segment, preset["y_px"] / (canvas_height or 1920))
+
+
 def _apply_position(segment: dict, y_norm: float) -> None:
     """Move a caption vertically. CapCut's inspector shows y x canvas height."""
     clip = segment.setdefault("clip", {})
@@ -1031,6 +1171,7 @@ def inject_subtitles(
     timeline: Optional[str] = None,
     font: Optional[str] = None,
     pos_y: Optional[float] = None,
+    preset: Optional[str] = None,
 ) -> dict:
     """Write `blocks` (seconds, timeline clock) into the project as a text track.
 
@@ -1038,6 +1179,9 @@ def inject_subtitles(
     text track id to overwrite instead of adding one. Refuses while CapCut is
     running unless `force`, because CapCut would overwrite the result from its
     own in-memory copy.
+
+    `preset` (a CAPTION_PRESETS key) fixes the whole look and overrides
+    `style_from`, `font` and `pos_y`.
     """
     if not blocks:
         raise CapCutError("쓸 자막이 없습니다")
@@ -1074,8 +1218,23 @@ def inject_subtitles(
             raise CapCutError("고른 글꼴을 찾을 수 없습니다: " + font)
     if pos_y is not None and not math.isfinite(pos_y):
         raise CapCutError("자막 위치 값이 올바르지 않습니다")
+    preset_cfg = None
+    if preset:
+        preset_cfg = CAPTION_PRESETS.get(preset)
+        if preset_cfg is None:
+            raise CapCutError("알 수 없는 자막 프리셋입니다: " + preset)
+        font_choice, pos_y, style_from = None, None, None
 
     draft, path = load_draft(name, root, timeline)
+    canvas_h = (draft.get("canvas_config") or {}).get("height") or 1920
+    preset_template = None
+    if preset_cfg:
+        preset_template = _preset_template(preset_cfg, draft, name, root, timeline)
+        if preset_template is None:
+            raise CapCutError(
+                f"'{preset_cfg['font_title']}' 글꼴을 쓴 캡션이 드래프트에 없어 {preset_cfg['label']} "
+                "프리셋을 만들 수 없습니다. 캡컷에서 그 글꼴로 캡션을 한 번 넣어주세요."
+            )
     if replace_track:
         text_mats = {m["id"]: m for m in draft.get("materials", {}).get("texts", [])}
         for track in draft.get("tracks", []):
@@ -1084,7 +1243,10 @@ def inject_subtitles(
     backup = backup_draft(path)
 
     total_us = draft.get("duration", 0)
-    if style_from:
+    if preset_template:
+        template = preset_template
+        style_source = "preset:" + preset_cfg["label"]
+    elif style_from:
         # Explicit choice wins: "most recent project that has subtitles" is a
         # poor guess when the user's projects mix formats — the newest one
         # here uses 궁서체 at 8pt for a landscape video, nothing like the
@@ -1169,6 +1331,10 @@ def inject_subtitles(
         else:
             mat = _default_text_material(text)
             seg = _default_text_segment(mat["id"], anim["id"], start_us, dur_us)
+        # Whatever was cloned, what we write is a caption, never 기본 텍스트.
+        mat["type"] = CAPTION_TYPE
+        if preset_cfg:
+            _apply_preset(mat, seg, preset_cfg, canvas_h)
         if font_choice:
             _apply_font(mat, font_choice)
         if pos_y is not None:
