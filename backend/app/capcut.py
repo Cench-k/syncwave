@@ -346,8 +346,11 @@ def project_info(draft: dict, track_index: Optional[int] = None,
             "speeds": sorted({round(s["speed"], 3) for s in segs}),
         })
     text_tracks = []
+    texts = {m["id"]: m for m in draft.get("materials", {}).get("texts", [])}
     for i, track in enumerate(draft.get("tracks", [])):
-        if track.get("type") == "text":
+        # Only caption tracks: offering a 기본 텍스트 track for "replace" would
+        # let one click wipe the video's titles.
+        if track.get("type") == "text" and _is_caption_track(track, texts):
             text_tracks.append({
                 "index": i,
                 "id": track.get("id"),
@@ -587,29 +590,58 @@ def segment_boundaries(speech: Dict[str, List[dict]]) -> List[float]:
 # Writing subtitles back
 
 
-def _find_style_template(draft: dict) -> Optional[tuple[dict, dict]]:
-    """An existing subtitle to clone, so the user's font and placement survive.
+# CapCut keeps captions (자막/캡션) and on-screen text (기본 텍스트) in the same
+# text tracks and tells them apart only by the material's type.
+CAPTION_TYPE = "subtitle"
 
-    Prefers the most-used text material in the project — that is the body
-    subtitle style rather than a one-off title.
+
+def _style_signature(seg: dict, mat: dict) -> tuple:
+    y = ((seg.get("clip") or {}).get("transform") or {}).get("y", 0.0)
+    return (
+        mat.get("font_resource_id") or mat.get("font_path") or "",
+        mat.get("font_size"),
+        mat.get("text_color"),
+        mat.get("border_color"),
+        mat.get("border_width"),
+        round(float(y or 0.0), 2),
+    )
+
+
+def _find_style_template(draft: dict) -> Optional[tuple[dict, dict]]:
+    """An existing caption to clone, so the user's font and placement survive.
+
+    Only captions count. Titles and other 기본 텍스트 live in the same tracks,
+    and cloning one turned SyncWave's output into on-screen text at the
+    title's position (0921 (1), second timeline: 108 texts vs 132 captions).
+
+    CapCut gives every caption its own material, so counting by material id
+    ranks them all at 1 and just returns whichever text comes first in the
+    draft. Group by look instead and take the style most captions share.
     """
     texts = {m["id"]: m for m in draft.get("materials", {}).get("texts", [])}
-    counts: Dict[str, int] = defaultdict(int)
-    seg_for: Dict[str, dict] = {}
+    groups: Dict[tuple, int] = defaultdict(int)
+    first: Dict[tuple, tuple[dict, dict]] = {}
     for track in draft.get("tracks", []):
         if track.get("type") != "text":
             continue
         for seg in track.get("segments", []):
-            mid = seg.get("material_id")
-            if mid in texts:
-                counts[mid] += 1
-                seg_for.setdefault(mid, seg)
-    if not counts:
+            mat = texts.get(seg.get("material_id"))
+            if not mat or mat.get("type") != CAPTION_TYPE:
+                continue
+            sig = _style_signature(seg, mat)
+            groups[sig] += 1
+            first.setdefault(sig, (seg, mat))
+    if not groups:
         return None
-    # Group identical styles: cloning any one of a 92-subtitle track is fine,
-    # so rank by how many segments share that material's font/size signature.
-    best_mid = max(counts, key=lambda m: counts[m])
-    return seg_for[best_mid], texts[best_mid]
+    return first[max(groups, key=lambda g: groups[g])]
+
+
+def _is_caption_track(track: dict, texts: Dict[str, dict]) -> bool:
+    """A text track whose segments are captions rather than on-screen text."""
+    kinds = [(texts.get(s.get("material_id")) or {}).get("type") for s in track.get("segments", [])]
+    kinds = [k for k in kinds if k]
+    # An empty track is a fresh target, fine to treat as captions.
+    return not kinds or sum(k == CAPTION_TYPE for k in kinds) * 2 > len(kinds)
 
 
 def describe_style(template: tuple[dict, dict], canvas_height: int = 1920) -> dict:
@@ -675,6 +707,8 @@ def font_candidates(root: Optional[Path] = None, limit: int = 40) -> List[dict]:
         except (CapCutError, json.JSONDecodeError, OSError):
             continue
         for mat in draft.get("materials", {}).get("texts", []):
+            if mat.get("type") != CAPTION_TYPE:
+                continue          # a title font is not a caption font
             rid = (mat.get("font_resource_id") or "").strip()
             path = (mat.get("font_path") or "").strip()
             if not path or not os.path.exists(path):
@@ -1042,6 +1076,11 @@ def inject_subtitles(
         raise CapCutError("자막 위치 값이 올바르지 않습니다")
 
     draft, path = load_draft(name, root, timeline)
+    if replace_track:
+        text_mats = {m["id"]: m for m in draft.get("materials", {}).get("texts", [])}
+        for track in draft.get("tracks", []):
+            if track.get("id") == replace_track and not _is_caption_track(track, text_mats):
+                raise CapCutError("캡션 트랙이 아니라 교체하지 않습니다 (기본 텍스트 트랙)")
     backup = backup_draft(path)
 
     total_us = draft.get("duration", 0)
