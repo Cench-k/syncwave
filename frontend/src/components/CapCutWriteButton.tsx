@@ -18,7 +18,9 @@ import {
 
 const STYLE_KEY = "syncwave:styleFrom";
 const FONT_KEY = "syncwave:font";
-const POS_KEY = "syncwave:posY";
+// Stored as {id, y} with y normalised: a pixel value only means something for
+// one canvas height, and -1017px on a 1920 short is off-screen on a 1080 video.
+const POS_KEY = "syncwave:position";
 
 // Positive y is up. Verified against the user's drafts: subtitles sit at
 // -0.44..-0.60 and the occasional title at +0.83.
@@ -53,6 +55,7 @@ export default function CapCutWriteButton({ project, timeline = null, blocks, on
   const [font, setFont] = useState("");
   const [posId, setPosId] = useState("");
   const [posPx, setPosPx] = useState("");
+  const [savedCustomY, setSavedCustomY] = useState<number | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -76,14 +79,26 @@ export default function CapCutWriteButton({ project, timeline = null, blocks, on
         if (saved && f.some((x) => x.key === saved)) setFont(saved);
       })
       .catch(() => setFonts([]));
-    const savedPos = localStorage.getItem(POS_KEY);
-    if (savedPos) {
-      setPosId("custom");
-      setPosPx(savedPos);
+    try {
+      const saved = JSON.parse(localStorage.getItem(POS_KEY) || "null");
+      if (saved && POSITIONS.some((p) => p.id === saved.id)) {
+        setPosId(saved.id);
+        setSavedCustomY(saved.id === "custom" && Number.isFinite(saved.y) ? saved.y : null);
+      }
+    } catch {
+      localStorage.removeItem(POS_KEY);
     }
   }, [open, project, timeline]);
 
   const canvasH = info?.canvas?.height || 1920;
+
+  // Show a remembered custom position in this project's own pixels, once we
+  // know its canvas height.
+  useEffect(() => {
+    if (savedCustomY === null || !info) return;
+    setPosPx(String(Math.round(savedCustomY * canvasH)));
+    setSavedCustomY(null);
+  }, [savedCustomY, info, canvasH]);
 
   /** Normalised y to send, or null to keep the cloned style's own position. */
   function resolvePosY(): number | null {
@@ -113,8 +128,8 @@ export default function CapCutWriteButton({ project, timeline = null, blocks, on
       });
       if (styleFrom) localStorage.setItem(STYLE_KEY, styleFrom);
       if (font) localStorage.setItem(FONT_KEY, font);
-      if (posId === "custom" && posPx) localStorage.setItem(POS_KEY, posPx);
-      else if (posId !== "custom") localStorage.removeItem(POS_KEY);
+      else localStorage.removeItem(FONT_KEY);
+      localStorage.setItem(POS_KEY, JSON.stringify({ id: posId, y: resolvePosY() }));
       setResult(r);
       onDone(`캡컷에 자막 ${r.written}개 기록됨`);
       // CapCut can save over us seconds later, so check without being asked.

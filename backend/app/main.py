@@ -353,7 +353,8 @@ if LOCAL_MODE:
     async def capcut_fonts():
         """Fonts present in the user's own drafts — the only ones CapCut can
         actually resolve, since a font is a cached resource id, not a name."""
-        return {"fonts": capcut.font_candidates()}
+        public = ("key", "label", "title", "resource_id", "path", "uses", "seen_in")
+        return {"fonts": [{k: f[k] for k in public} for f in capcut.font_candidates()]}
 
     @app.post("/capcut/write", dependencies=[Depends(require_auth)])
     async def capcut_write(payload: dict):
@@ -361,6 +362,12 @@ if LOCAL_MODE:
         blocks = payload.get("blocks")
         if not project or not isinstance(blocks, list):
             raise HTTPException(400, "project and blocks are required")
+        pos_y = payload.get("pos_y")
+        if pos_y is not None:
+            try:
+                pos_y = float(pos_y)
+            except (TypeError, ValueError):
+                raise HTTPException(400, "pos_y must be a number") from None
         try:
             return capcut.inject_subtitles(
                 project,
@@ -371,7 +378,7 @@ if LOCAL_MODE:
                 style_from=payload.get("style_from") or None,
                 timeline=payload.get("timeline") or None,
                 font=payload.get("font") or None,
-                pos_y=payload.get("pos_y"),
+                pos_y=pos_y,
             )
         except capcut.EditorOpenError as e:
             # 409 so the client can offer "close CapCut and retry" rather than
