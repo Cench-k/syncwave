@@ -273,6 +273,24 @@ def default_audio_track(draft: dict, types: Iterable[str] = SPEECH_TYPES,
     return None
 
 
+def resolve_audio_track(draft: dict, track_index: Optional[int],
+                        types: Iterable[str] = SPEECH_TYPES,
+                        base_dir: Optional[Path] = None) -> Optional[int]:
+    """The requested audio track if it really carries speech, else the default.
+
+    The index points into `tracks`, which is laid out differently per project
+    and per timeline. A choice carried over from another timeline landed on
+    a video track (0921 (1): main narration is track 1, the second timeline's
+    track 1 is video), so the user saw "음성 트랙을 찾지 못했습니다" with every
+    mp3 in place. Never trust a stale index — fall back to the narration track.
+    """
+    if track_index is not None:
+        for t in audio_tracks(draft, types, base_dir):
+            if t["index"] == track_index and t["speech_segments"]:
+                return track_index
+    return default_audio_track(draft, types, base_dir)
+
+
 def speech_segments(draft: dict, types: Iterable[str] = SPEECH_TYPES,
                     track_index: Optional[int] = None,
                     base_dir: Optional[Path] = None) -> Dict[str, List[dict]]:
@@ -285,8 +303,7 @@ def speech_segments(draft: dict, types: Iterable[str] = SPEECH_TYPES,
     under the video, which is where the narration is.
     """
     types = set(types)
-    if track_index is None:
-        track_index = default_audio_track(draft, types, base_dir)
+    track_index = resolve_audio_track(draft, track_index, types, base_dir)
     mats = {m["id"]: m for m in draft.get("materials", {}).get("audios", [])}
     by_path: Dict[str, List[dict]] = defaultdict(list)
     for i, track in enumerate(draft.get("tracks", [])):
@@ -316,8 +333,7 @@ def speech_segments(draft: dict, types: Iterable[str] = SPEECH_TYPES,
 
 def project_info(draft: dict, track_index: Optional[int] = None,
                  base_dir: Optional[Path] = None) -> dict:
-    if track_index is None:
-        track_index = default_audio_track(draft, base_dir=base_dir)
+    track_index = resolve_audio_track(draft, track_index, base_dir=base_dir)
     speech = speech_segments(draft, track_index=track_index, base_dir=base_dir)
     files = []
     for path, segs in sorted(speech.items(), key=lambda kv: -sum(s["tldur"] for s in kv[1])):
@@ -445,6 +461,7 @@ def build_speech_audio(draft: dict, out_path: str, only_paths: Optional[Iterable
     "aligned" into evenly spaced nonsense. One short call per segment costs a
     few seconds next to Whisper and cannot fail that way.
     """
+    track_index = resolve_audio_track(draft, track_index, base_dir=base_dir)
     speech = speech_segments(draft, track_index=track_index, base_dir=base_dir)
     if only_paths is not None:
         wanted = set(only_paths)
@@ -541,7 +558,7 @@ def build_speech_audio(draft: dict, out_path: str, only_paths: Optional[Iterable
         "skipped": failed,
         "repaired": sorted(set(repaired)),
         "duration": round(len(timeline) / 1000, 3),
-        "audio_track": track_index if track_index is not None else default_audio_track(draft, base_dir=base_dir),
+        "audio_track": track_index,
         # Where each piece of speech audio starts on the timeline. Those cuts
         # were made by hand at line boundaries, so they anchor subtitle starts
         # better than Whisper's word timestamps — the caller snaps to them.

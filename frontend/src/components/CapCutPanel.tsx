@@ -42,32 +42,52 @@ export default function CapCutPanel({ lang, onLangChange, onSubmit, disabled }: 
       .catch((e) => setError(String(e.message || e)));
   }, []);
 
-  // Picking a project resets the timeline; picking a timeline reloads the
-  // audio/subtitle summary for that timeline specifically.
-  useEffect(() => {
+  // The audio track is an index into that timeline's `tracks`, which differ
+  // per project and per timeline. Reset it in the same handler as the switch:
+  // a separate reset effect ran *after* the fetch had already gone out with
+  // the old index, and on 0921 (1) that old index was a video track.
+  function pickProject(name: string) {
+    setSelected(name);
     setTimeline("");
     setAudioTrack(null);
-  }, [selected]);
+  }
+
+  function pickTimeline(id: string) {
+    setTimeline(id);
+    setAudioTrack(null);
+  }
 
   useEffect(() => {
     if (!selected) {
       setInfo(null);
       return;
     }
+    // Responses can land out of order; only the latest request may win.
+    let stale = false;
     setLoadingInfo(true);
     setError(null);
     getCapCutProject(selected, timeline || null, audioTrack)
       .then((i) => {
+        if (stale) return;
         setInfo(i);
-        if (audioTrack === null && i.audio_track !== null) setAudioTrack(i.audio_track);
+        // The backend falls back to the narration track when asked for one
+        // without speech, so follow whatever it actually used.
+        if (i.audio_track !== null && i.audio_track !== audioTrack) setAudioTrack(i.audio_track);
         // Default to the main timeline so the label matches what we read.
         if (!timeline && i.timelines.length > 1) {
           const main = i.timelines.find((t) => t.is_main) ?? i.timelines[0];
           setTimeline(main.id);
         }
       })
-      .catch((e) => setError(String(e.message || e)))
-      .finally(() => setLoadingInfo(false));
+      .catch((e) => {
+        if (!stale) setError(String(e.message || e));
+      })
+      .finally(() => {
+        if (!stale) setLoadingInfo(false);
+      });
+    return () => {
+      stale = true;
+    };
   }, [selected, timeline, audioTrack]);
 
   const missing = info?.speech_files.filter((f) => !f.exists) ?? [];
@@ -105,7 +125,7 @@ export default function CapCutPanel({ lang, onLangChange, onSubmit, disabled }: 
             </label>
             <select
               value={selected}
-              onChange={(e) => setSelected(e.target.value)}
+              onChange={(e) => pickProject(e.target.value)}
               disabled={disabled}
               className="w-full bg-bg border border-border rounded px-2 py-2 text-sm focus:border-accent outline-none mb-1"
             >
@@ -132,7 +152,7 @@ export default function CapCutPanel({ lang, onLangChange, onSubmit, disabled }: 
             </label>
             <select
               value={timeline}
-              onChange={(e) => setTimeline(e.target.value)}
+              onChange={(e) => pickTimeline(e.target.value)}
               disabled={disabled}
               className="w-full bg-bg border border-border rounded px-2 py-2 text-sm focus:border-accent outline-none mb-4"
             >
