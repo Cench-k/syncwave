@@ -446,6 +446,9 @@ def _readable_variant(path: str) -> Optional[str]:
 
 
 SILENCE_FLOOR_DB = -80.0
+# Share of the speech (by timeline seconds) that may be missing before the job
+# is refused. Keep in sync with MAX_MISSING_SHARE in CapCutPanel.tsx.
+MAX_MISSING_SHARE = 0.2
 
 
 def build_speech_audio(draft: dict, out_path: str, only_paths: Optional[Iterable[str]] = None,
@@ -473,6 +476,18 @@ def build_speech_audio(draft: dict, out_path: str, only_paths: Optional[Iterable
     # 1.6s clip should not block a two-minute narration. Those stretches come
     # out silent, so the caller reports them.
     missing = sorted(os.path.basename(p) for p in speech if not os.path.exists(p))
+    # ...but not when most of the speech is gone. On 1001 (3) the narration
+    # folder had been moved, 10 of 11 files were missing, and the job aligned
+    # 88 lines against one second of audio — every subtitle landed wrong.
+    total_cov = sum(s["tldur"] for segs in speech.values() for s in segs)
+    missing_cov = sum(s["tldur"] for p, segs in speech.items()
+                      if not os.path.exists(p) for s in segs)
+    if total_cov > 0 and missing_cov / total_cov > MAX_MISSING_SHARE:
+        raise CapCutError(
+            f"음성 {missing_cov:.1f}초 / {total_cov:.1f}초를 찾을 수 없습니다 — 파일을 옮기셨다면 "
+            "캡컷에서 프로젝트를 열어 다시 연결한 뒤 닫고 시도해주세요 (없는 파일: "
+            + ", ".join(missing[:5]) + (" …" if len(missing) > 5 else "") + ")"
+        )
     speech = {p: segs for p, segs in speech.items() if os.path.exists(p)}
     if not speech:
         raise CapCutError(

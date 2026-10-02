@@ -16,6 +16,9 @@ interface Props {
   disabled?: boolean;
 }
 
+// Keep in sync with MAX_MISSING_SHARE in backend/app/capcut.py.
+const MAX_MISSING_SHARE = 0.2;
+
 function when(ts: number): string {
   const d = new Date(ts * 1000);
   const p = (n: number) => String(n).padStart(2, "0");
@@ -92,9 +95,13 @@ export default function CapCutPanel({ lang, onLangChange, onSubmit, disabled }: 
 
   const missing = info?.speech_files.filter((f) => !f.exists) ?? [];
   const usable = (info?.speech_files.length ?? 0) - missing.length;
-  // A missing clip no longer blocks the job — the backend skips it and that
-  // stretch comes out silent. Only refuse when nothing at all is readable.
-  const ready = Boolean(selected && script && info && usable > 0);
+  const missingSec = missing.reduce((a, f) => a + f.coverage, 0);
+  const totalSec = info?.speech_files.reduce((a, f) => a + f.coverage, 0) ?? 0;
+  // A missing clip doesn't block the job — the backend skips it and that
+  // stretch comes out silent. But once most of the speech is gone (e.g. the
+  // narration folder was moved) every subtitle would land wrong, so refuse.
+  const tooMuchMissing = totalSec > 0 && missingSec / totalSec > MAX_MISSING_SHARE;
+  const ready = Boolean(selected && script && info && usable > 0 && !tooMuchMissing);
 
   return (
     <div className="w-full max-w-2xl mx-auto">
@@ -212,10 +219,17 @@ export default function CapCutPanel({ lang, onLangChange, onSubmit, disabled }: 
               </p>
             ) : (
               <>
-              {missing.length > 0 && (
+              {missing.length > 0 && tooMuchMissing && (
+                <p className="mb-2 text-red-300">
+                  음성 {missingSec.toFixed(1)}초 / {totalSec.toFixed(1)}초가 파일 없음입니다. 이대로는
+                  자막이 전부 어긋납니다. 파일을 옮기셨다면 캡컷에서 프로젝트를 열어 다시
+                  연결하고 닫은 뒤, 프로젝트를 다시 선택해주세요.
+                </p>
+              )}
+              {missing.length > 0 && !tooMuchMissing && (
                 <p className="mb-2 text-amber-300">
                   파일 {missing.length}개를 찾을 수 없어 건너뜁니다 (합계{" "}
-                  {missing.reduce((a, f) => a + f.coverage, 0).toFixed(1)}초). 그 구간은
+                  {missingSec.toFixed(1)}초). 그 구간은
                   무음으로 처리되므로 근처 자막이 어긋날 수 있습니다.
                 </p>
               )}
