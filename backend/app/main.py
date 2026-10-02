@@ -38,7 +38,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from pydub import AudioSegment
 
-from .aligner import align
+from .aligner import MODEL_STATUS, align, start_model_sync
 from .cleanup import sweep_temp
 
 
@@ -74,6 +74,10 @@ scheduler = BackgroundScheduler()
 async def lifespan(app: FastAPI):
     scheduler.add_job(lambda: sweep_temp(TEMP_DIR), "interval", hours=1)
     scheduler.start()
+    if LOCAL_MODE:
+        # Check the Whisper model against the Hub on every launch. Local only:
+        # the Space bakes its model into the image at build time.
+        start_model_sync()
     yield
     scheduler.shutdown(wait=False)
 
@@ -113,6 +117,12 @@ def require_auth(creds: HTTPBasicCredentials | None = Depends(_basic)):
 @app.get("/health")
 async def health():
     return {"status": "ok", "local": LOCAL_MODE}
+
+
+@app.get("/model/status")
+async def model_status():
+    """Result of the launch-time Whisper model check."""
+    return MODEL_STATUS
 
 
 def _ext(name: str) -> str:

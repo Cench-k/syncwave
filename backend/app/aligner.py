@@ -32,14 +32,90 @@ _MODEL_COMPUTE = os.environ.get("WHISPER_COMPUTE", "int8")
 _MODEL: Optional[WhisperModel] = None
 _MODEL_LOCK = threading.Lock()
 
+# What the last model check found, for GET /model/status. `state` is one of
+# idle · checking · downloading · up_to_date · updated · offline · error.
+MODEL_STATUS: dict = {
+    "model": _MODEL_SIZE, "repo": None, "revision": None,
+    "state": "idle", "checked_at": None, "error": None,
+}
+_MODEL_PATH: Optional[str] = None
+_SYNC_THREAD: Optional[threading.Thread] = None
+
+
+def _repo_id(size: str) -> str:
+    if "/" in size:
+        return size
+    from faster_whisper.utils import _MODELS
+    return _MODELS.get(size, f"Systran/faster-whisper-{size}")
+
+
+def _local_snapshot() -> Optional[str]:
+    from faster_whisper.utils import download_model
+    try:
+        return download_model(_MODEL_SIZE, local_files_only=True)
+    except Exception:
+        return None
+
+
+def sync_model() -> None:
+    """Compare the cached model with the Hub and fetch a newer revision.
+
+    faster-whisper already re-syncs when the model is first loaded, but
+    invisibly and in the middle of the user's first alignment. Running this at
+    startup moves the wait up front and leaves a status the UI can show.
+    """
+    global _MODEL_PATH
+    import time
+    from faster_whisper.utils import download_model
+    from huggingface_hub import HfApi
+
+    repo = _repo_id(_MODEL_SIZE)
+    local = _local_snapshot()
+    local_rev = os.path.basename(local) if local else None
+    MODEL_STATUS.update(repo=repo, revision=local_rev and local_rev[:7],
+                        state="checking", error=None)
+    try:
+        remote_rev = HfApi().model_info(repo, timeout=15).sha
+    except Exception as exc:
+        # No network: keep using what we have; with nothing cached the first
+        # alignment will fail with the download error, as it always did.
+        MODEL_STATUS.update(state="offline" if local else "error",
+                            error=f"{type(exc).__name__}: {exc}"[:300],
+                            checked_at=time.time())
+        _MODEL_PATH = local
+        return
+    try:
+        if remote_rev != local_rev:
+            MODEL_STATUS["state"] = "downloading"
+            local = download_model(_MODEL_SIZE)
+            MODEL_STATUS["state"] = "updated" if local_rev else "up_to_date"
+        else:
+            MODEL_STATUS["state"] = "up_to_date"
+        _MODEL_PATH = local
+        MODEL_STATUS["revision"] = os.path.basename(local)[:7]
+    except Exception as exc:
+        MODEL_STATUS.update(state="error", error=f"{type(exc).__name__}: {exc}"[:300])
+        _MODEL_PATH = _local_snapshot()
+    MODEL_STATUS["checked_at"] = time.time()
+
+
+def start_model_sync() -> None:
+    global _SYNC_THREAD
+    _SYNC_THREAD = threading.Thread(target=sync_model, name="model-sync", daemon=True)
+    _SYNC_THREAD.start()
+
 
 def _get_model() -> WhisperModel:
     global _MODEL
     if _MODEL is None:
+        # Let a startup check finish first, so an update isn't fetched twice
+        # and the freshly synced copy is the one that gets loaded.
+        if _SYNC_THREAD is not None:
+            _SYNC_THREAD.join()
         with _MODEL_LOCK:
             if _MODEL is None:
                 _MODEL = WhisperModel(
-                    _MODEL_SIZE,
+                    _MODEL_PATH or _MODEL_SIZE,
                     device=_MODEL_DEVICE,
                     compute_type=_MODEL_COMPUTE,
                 )

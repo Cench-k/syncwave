@@ -10,7 +10,9 @@ import {
   alignFiles,
   alignAgainstCapCut,
   fetchCombinedAudio,
+  getModelStatus,
   isLocalBackend,
+  ModelStatus,
   pingHealth,
 } from "@/lib/api";
 import { loadSession, clearSession } from "@/lib/storage";
@@ -32,6 +34,34 @@ type Phase =
 
 type Mode = "file" | "capcut";
 
+const MODEL_STATE: Record<ModelStatus["state"], [string, string]> = {
+  idle: ["확인 대기", "text-muted"],
+  checking: ["최신 버전 확인 중…", "text-muted"],
+  downloading: ["새 버전 받는 중…", "text-amber-300"],
+  up_to_date: ["최신", "text-emerald-400"],
+  updated: ["방금 최신으로 업데이트됨", "text-emerald-400"],
+  offline: ["확인 못 함 (오프라인) · 받아둔 모델 사용", "text-amber-300"],
+  error: ["확인 실패", "text-red-300"],
+};
+
+function ModelBadge({ s }: { s: ModelStatus }) {
+  const [label, color] = MODEL_STATE[s.state] ?? [s.state, "text-muted"];
+  const when = s.checked_at
+    ? new Date(s.checked_at * 1000).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })
+    : null;
+  return (
+    <span
+      className="text-[11px] font-mono text-muted text-right"
+      title={[s.repo, s.error].filter(Boolean).join("\n")}
+    >
+      모델 {s.model}
+      {s.revision && <span className="text-muted/60"> @{s.revision}</span>} ·{" "}
+      <span className={color}>{label}</span>
+      {when && <span className="text-muted/60"> ({when} 확인)</span>}
+    </span>
+  );
+}
+
 export default function Home() {
   const [phase, setPhase] = useState<Phase>({ kind: "home" });
   const [savedSession, setSavedSession] = useState<SavedSession | null>(null);
@@ -46,6 +76,28 @@ export default function Home() {
     // machine; the hosted deployment does not register those routes at all.
     isLocalBackend().then(setLocal);
   }, []);
+
+  // The backend checks the Whisper model against the Hub on every launch;
+  // poll until that check settles so a download in progress stays visible.
+  const [model, setModel] = useState<ModelStatus | null>(null);
+  useEffect(() => {
+    if (!local) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let stopped = false;
+    const poll = async () => {
+      const s = await getModelStatus();
+      if (stopped) return;
+      setModel(s);
+      if (s && ["idle", "checking", "downloading"].includes(s.state)) {
+        timer = setTimeout(poll, 2000);
+      }
+    };
+    poll();
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
+  }, [local]);
 
   async function handleCapCutSubmit(
     project: string,
@@ -121,10 +173,11 @@ export default function Home() {
 
   return (
     <main className="min-h-screen flex flex-col">
-      <header className="px-6 py-4 border-b border-border">
+      <header className="px-6 py-4 border-b border-border flex items-center justify-between gap-4">
         <h1 className="text-lg font-semibold">
           <span className="text-accent">Sync</span>Wave
         </h1>
+        {model && <ModelBadge s={model} />}
       </header>
 
       <div className="flex-1 flex items-center justify-center px-4 py-12">

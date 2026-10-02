@@ -71,6 +71,25 @@ export async function pingHealth(timeoutMs = 60_000): Promise<boolean> {
 // SYNCWAVE_LOCAL set, so every call here must tolerate a 404 and the UI stays
 // hidden on the hosted deployment.
 
+export interface ModelStatus {
+  model: string;
+  repo: string | null;
+  revision: string | null;
+  state: "idle" | "checking" | "downloading" | "up_to_date" | "updated" | "offline" | "error";
+  checked_at: number | null;
+  error: string | null;
+}
+
+/** The launch-time Whisper model check (local backend only). */
+export async function getModelStatus(): Promise<ModelStatus | null> {
+  try {
+    const r = await fetch(`${BASE}/model/status`);
+    return r.ok ? ((await r.json()) as ModelStatus) : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Whether this backend exposes the CapCut routes. */
 export async function isLocalBackend(): Promise<boolean> {
   try {
