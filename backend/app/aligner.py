@@ -172,6 +172,75 @@ def _interpolate_unmatched(
     return blocks_with_times
 
 
+ENERGY_HOP = 0.01          # seconds per RMS frame
+SPEECH_FLOOR_DB = -40.0    # dBFS; below this a frame counts as silence
+MIN_VOICED_FRAMES = 3      # a run this long is speech, not a click
+INNER_PAUSE_FRAMES = 25    # 0.25s of silence inside one "word" = two utterances
+
+
+def _refine_with_energy(words: List[dict], audio_path: str) -> None:
+    """Pull word edges out of the silence Whisper smears them into.
+
+    Whisper starts a word where the previous one ended, so the pause before a
+    line is charged to its first word. On 1001 (3) that put 30 of 88 lines
+    0.3–1.0s early — `물도 좀 마시고` at 51.52s, spoken at 54.07s. Here a start
+    sitting in silence moves forward to the first voiced frame, and an end
+    sitting in silence moves back to the last one, never past the word's
+    other edge. Words already on speech are untouched.
+    """
+    try:
+        import numpy as np
+        from faster_whisper.audio import decode_audio
+        sr = 16000
+        audio = decode_audio(audio_path, sampling_rate=sr)
+    except Exception:
+        return
+    hop = int(sr * ENERGY_HOP)
+    n = len(audio) // hop
+    if n == 0:
+        return
+    frames = audio[: n * hop].reshape(n, hop)
+    rms = np.sqrt(np.mean(frames.astype(np.float64) ** 2, axis=1))
+    voiced = 20 * np.log10(np.maximum(rms, 1e-10)) > SPEECH_FLOOR_DB
+    # Require a short run so a stray click doesn't count as an onset.
+    run = np.convolve(voiced.astype(int), np.ones(MIN_VOICED_FRAMES, int), "full")
+    onset_ok = run[MIN_VOICED_FRAMES - 1:] == MIN_VOICED_FRAMES  # run starting here
+    offset_ok = run[:n] == MIN_VOICED_FRAMES                      # run ending here
+
+    for k, w in enumerate(words):
+        a = max(0, min(n - 1, int(w["start"] / ENERGY_HOP)))
+        b = max(a + 1, min(n, int(np.ceil(w["end"] / ENERGY_HOP))))
+        # A start may move up to where the next word begins: Whisper sometimes
+        # ends a word before it is even spoken (`물도` 51.52–52.80, heard 54.07).
+        nxt = int(words[k + 1]["start"] / ENERGY_HOP) if k + 1 < len(words) else n
+        reach = max(b, min(n, nxt))
+        # A word doesn't contain a long pause. When one does, Whisper has
+        # stretched it back over the previous line's tail (`물도 좀 마시고`
+        # began at 51.52s on the end of `네, 그렇게 할게요`, then 2.3s of
+        # silence) — start after the last pause.
+        span = voiced[a:b]
+        silent_run = np.convolve((~span).astype(int), np.ones(INNER_PAUSE_FRAMES, int), "valid")
+        pauses = np.flatnonzero(silent_run == INNER_PAUSE_FRAMES)
+        if pauses.size:
+            after = a + pauses[-1] + INNER_PAUSE_FRAMES
+            hits = np.flatnonzero(onset_ok[after:reach])
+            if hits.size:
+                a = after + hits[0]
+        if not voiced[a]:
+            hits = np.flatnonzero(onset_ok[a:reach])
+            if hits.size:
+                a += hits[0]
+        if a * ENERGY_HOP > w["start"]:
+            w["start"] = a * ENERGY_HOP
+            w["end"] = max(w["end"], w["start"] + 0.1)
+            b = max(a + 1, min(n, int(np.ceil(w["end"] / ENERGY_HOP))))
+        if not voiced[b - 1]:
+            lo = max(a, int(w["start"] / ENERGY_HOP))
+            hits = np.flatnonzero(offset_ok[lo:b])
+            if hits.size:
+                w["end"] = (lo + hits[-1] + 1) * ENERGY_HOP
+
+
 def align(audio_path: str, script_path: str, lang: str) -> List[dict]:
     """Run Whisper-based forced alignment.
 
@@ -205,6 +274,8 @@ def align(audio_path: str, script_path: str, lang: str) -> List[dict]:
                 "start": float(w.start),
                 "end": float(w.end),
             })
+
+    _refine_with_energy(whisper_words, audio_path)
 
     audio_duration = float(getattr(info, "duration", 0.0) or 0.0)
     if whisper_words and audio_duration <= 0:
